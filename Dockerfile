@@ -33,6 +33,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Never root: a container escape should not start from uid 0.
 RUN useradd --create-home --uid 1000 tutors
 
+# The working directory has to belong to that user, not just the files inside it. `WORKDIR`
+# creates it as root, and `COPY --chown` only touches what it copies — so with the default
+# SQLite URL the application could not create its database file and died on the first
+# migration. Postgres hides the problem; whoever runs the image as shipped hits it.
+RUN mkdir -p /app && chown tutors:tutors /app
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
