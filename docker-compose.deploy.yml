@@ -1,0 +1,96 @@
+# Pilha completa: PostgreSQL + API + frontend.
+#
+# Pensado para uma VM/LXC do Proxmox atras de um proxy reverso que termina TLS. Os dois
+# servicos escutam so em 127.0.0.1 de proposito: quem publica na rede e o proxy, e nao o
+# container.
+#
+#   cp .env.deploy.example .env.deploy   # ajuste os valores
+#   docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d --build
+#   docker compose -f docker-compose.deploy.yml --env-file .env.deploy exec api python -m scripts.seed
+#
+# O ultimo comando imprime a chave de embed e o link pronto de demonstracao.
+#
+# O frontend espera o codigo do repositorio `dot-tutors-frontend` ao lado deste. Ajuste
+# `FRONTEND_CONTEXT` se o seu layout for outro.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tutors}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-tutors}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tutors} -d ${POSTGRES_DB:-tutors}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      LOG_LEVEL: INFO
+      DATABASE_URL: >-
+        postgresql+asyncpg://${POSTGRES_USER:-tutors}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tutors}
+      JWT_SECRET: ${JWT_SECRET:?defina JWT_SECRET}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?defina SEED_ADMIN_EMAIL}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?defina SEED_ADMIN_PASSWORD}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gemini-3.6-flash}
+      # Origens do painel e allowlist padrao das chaves novas: os dominios publicos reais.
+      ADMIN_ORIGIN: ${PUBLIC_APP_URL:?defina PUBLIC_APP_URL}
+      EMBED_DEFAULT_ORIGINS: ${PUBLIC_APP_URL}
+      FRONTEND_BASE_URL: ${PUBLIC_APP_URL}
+      # Um proxy reverso na frente. Sem isto, todo cliente compartilharia o IP do proxy e um
+      # unico visitante esgotaria o rate limit de todos.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+      # O recrutador vai querer navegar a API; por isso o /docs fica ligado explicitamente,
+      # e nao por acidente do ambiente.
+      EXPOSE_API_DOCS: ${EXPOSE_API_DOCS:-true}
+      # Single instance here, so migrating at boot is safe. With replicas this would race and
+      # belongs in a one-shot job instead.
+      RUN_MIGRATIONS_ON_START: "true"
+      RUN_SEED_ON_START: ${RUN_SEED_ON_START:-true}
+    # Publicado apenas no loopback: o proxy reverso e quem fala com a internet.
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=3).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    build:
+      context: ${FRONTEND_CONTEXT:-../dot-tutors-frontend}
+      args:
+        # Inlined into the client bundle at build time — changing these needs a rebuild.
+        NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL:?defina PUBLIC_API_URL}
+        NEXT_PUBLIC_APP_BASE_URL: ${PUBLIC_APP_URL}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Server-side only: the CSP middleware talks to the API over the compose network, so it
+      # does not depend on the public hostname resolving from inside the container.
+      API_INTERNAL_BASE_URL: http://api:8000
+      NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL}
+      NEXT_PUBLIC_APP_BASE_URL: ${PUBLIC_APP_URL}
+      NEXT_PUBLIC_DEMO_EMBED_KEY: ${DEMO_EMBED_KEY:-}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+
+volumes:
+  postgres_data:

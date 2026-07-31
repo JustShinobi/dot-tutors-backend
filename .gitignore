@@ -17,6 +17,7 @@ htmlcov/
 # Ambiente / segredos
 .env
 .env.local
+.env.deploy
 *.local
 
 # Banco local

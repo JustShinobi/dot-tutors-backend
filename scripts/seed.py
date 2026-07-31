@@ -16,8 +16,10 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.security import hash_password
 from app.db.models.admin import AdminRole, AdminUser
+from app.db.models.embed import EmbedKey
 from app.db.models.tutor import SourceKind, Tutor, TutorSource, TutorStatus
 from app.db.session import create_engine, create_session_factory
+from app.services.embed_service import generate_public_key
 
 logger = get_logger("scripts.seed")
 
@@ -166,6 +168,41 @@ async def seed_tutors(session: AsyncSession) -> list[Tutor]:
     return created
 
 
+async def seed_embed_key(session: AsyncSession, settings: Settings) -> EmbedKey | None:
+    """Give the first demo tutor a ready-to-use embed key.
+
+    Without this, seeing the widget means logging in, creating a key, copying it into
+    `.env.local` and restarting the frontend — four manual steps before anything is visible.
+    The key is public by design, so seeding one leaks nothing.
+    """
+    tutor = (
+        await session.execute(select(Tutor).where(Tutor.slug == DEMO_TUTORS[0].slug))
+    ).scalar_one_or_none()
+    if tutor is None:  # pragma: no cover - only if the tutor seed was removed
+        return None
+
+    existing = (
+        (await session.execute(select(EmbedKey).where(EmbedKey.tutor_id == tutor.id)))
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        logger.info("seed_embed_key_exists", embed_key_id=existing.id)
+        return existing
+
+    key = EmbedKey(
+        tutor_id=tutor.id,
+        public_key=generate_public_key(),
+        label="Chave de demonstracao",
+        allowed_origins=list(settings.default_embed_origins),
+        is_active=True,
+    )
+    session.add(key)
+    await session.flush()
+    logger.info("seed_embed_key_created", embed_key_id=key.id, tutor_id=tutor.id)
+    return key
+
+
 async def main() -> None:
     settings = get_settings()
     configure_logging(level=settings.log_level, json_output=False)
@@ -176,6 +213,8 @@ async def main() -> None:
     async with session_factory() as session:
         await seed_admin(session, settings)
         await seed_tutors(session)
+        key = await seed_embed_key(session, settings)
+        public_key = key.public_key if key else None
         await session.commit()
 
     await engine.dispose()
@@ -184,6 +223,13 @@ async def main() -> None:
     print(f"  Admin: {settings.seed_admin_email}")
     print("  Senha: definida em SEED_ADMIN_PASSWORD")
     print(f"  Tutores: {', '.join(spec.slug for spec in DEMO_TUTORS)}")
+
+    if public_key:
+        frontend = settings.frontend_base_url.rstrip("/")
+        print(f"\n  Chave de embed: {public_key}")
+        print(f"  Widget:         {frontend}/embed/{public_key}")
+        print(f"  Demonstracao:   {frontend}/demo?key={public_key}")
+        print(f"  Origens:        {', '.join(settings.default_embed_origins) or 'qualquer (dev)'}")
 
 
 if __name__ == "__main__":

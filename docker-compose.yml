@@ -1,4 +1,4 @@
-# PostgreSQL opcional.
+# PostgreSQL opcional, para desenvolvimento local.
 #
 # O projeto roda com SQLite por padrao (zero dependencia externa). Suba este servico apenas
 # se quiser paridade com producao; depois aponte DATABASE_URL para ele:
@@ -6,6 +6,8 @@
 #   docker compose up -d db
 #   DATABASE_URL=postgresql+asyncpg://tutors:tutors@localhost:5432/tutors
 #   alembic upgrade head
+#
+# Para a pilha completa (API + frontend + banco), use `docker-compose.deploy.yml`.
 
 services:
   db:
