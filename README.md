@@ -251,7 +251,7 @@ LangGraph, cujo ganho aparece em grafos com múltiplos nós, ramificação e che
 **2. Testabilidade decidiu.** O §5.3 exige testes nos pontos críticos, e o ponto crítico é o
 agente. `FunctionModel` permite rodar o **loop real, as ferramentas reais e a recuperação BM25
 real** com o modelo roteirizado — sem chave de API, sem rede, sem custo de token e sem
-instabilidade. São 13 testes que provam que o agente busca na fonte certa, se recupera de um id
+instabilidade. São 18 testes que provam que o agente busca na fonte certa, se recupera de um id
 alucinado e degrada quando uma fonte cai.
 
 **3. Tipagem e injeção de dependências combinam com a stack.** `RunContext[AgentDeps]` é o

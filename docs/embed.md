@@ -62,9 +62,15 @@ O navegador bloqueou o enquadramento via `frame-ancestors`. Mesma causa: origem 
 ou chave revogada. O console do navegador mostra a violação de CSP.
 
 **O widget diz "Este tutor está indisponível no momento".**
-O tutor foi desativado no painel. Sessões existentes continuam válidas até expirarem; novas são
-recusadas. Isso é intencional — desativar tira do ar sem quebrar quem está no meio de uma
-conversa.
+O tutor foi desativado no painel. O efeito é imediato: além de recusar novas sessões, quem já
+estava conversando recebe essa mensagem na próxima pergunta. Desativar tira do ar de verdade —
+sem quebrar a sua página, que continua carregando o widget normalmente.
+
+**O widget diz "A chave de incorporação é inválida ou foi revogada".**
+A chave foi revogada no painel, ou o seu domínio saiu da lista de origens permitidas. Também é
+imediato, pelo mesmo motivo: cada mensagem reconfere a chave e a origem contra a configuração
+atual. Um token de sessão vale por até 30 minutos, e se não fosse reconferido "revogar"
+significaria, na prática, "revogar daqui a meia hora".
 
 **Funciona em uma aba e não em outra.**
 A sessão vive em `sessionStorage`, isolada por aba e por site hospedeiro. Cada aba abre a sua.
