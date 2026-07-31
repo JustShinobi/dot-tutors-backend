@@ -10,11 +10,19 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from app.api.deps import SessionDep, TutorServiceDep, require_admin
+from app.api.deps import (
+    ChatRepositoryDep,
+    SessionDep,
+    SourceServiceDep,
+    TutorServiceDep,
+    require_admin,
+)
 from app.db.models.tutor import TutorStatus
+from app.schemas.chat import MessageRead, SessionSummary
 from app.schemas.tutor import (
     SourceCreate,
     SourceRead,
+    SourceStatus,
     TutorCreate,
     TutorListQuery,
     TutorPage,
@@ -151,3 +159,81 @@ async def remove_source(
     await service.remove_source(tutor_id, source_id)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/{tutor_id}/sources/status",
+    response_model=list[SourceStatus],
+    summary="Estado das fontes como o agente as enxerga",
+    description=(
+        "Mostra se cada fonte foi obtida com sucesso, quanto texto ela tem e qual erro ocorreu. "
+        "Serve para descobrir uma URL quebrada na configuracao, e nao durante uma conversa."
+    ),
+)
+async def get_sources_status(
+    tutor_id: str, service: TutorServiceDep, sources: SourceServiceDep, session: SessionDep
+) -> list[SourceStatus]:
+    await service.get(tutor_id)
+    statuses = await sources.list_sources(tutor_id)
+    # Loading may have populated or refreshed the cache; keep that work.
+    await session.commit()
+    return [SourceStatus.model_validate(info, from_attributes=True) for info in statuses]
+
+
+@router.post(
+    "/{tutor_id}/sources/{source_id}/refresh",
+    response_model=SourceStatus,
+    summary="Forca a releitura de uma fonte",
+    description=(
+        "Ignora o TTL do cache e busca a fonte novamente. Sem isso, corrigir uma URL quebrada "
+        "ou publicar uma versao nova do documento so tem efeito depois de "
+        "SOURCE_CACHE_TTL_MINUTES."
+    ),
+    responses={404: {"description": "Fonte nao encontrada neste tutor"}},
+)
+async def refresh_source(
+    tutor_id: str,
+    source_id: str,
+    service: TutorServiceDep,
+    sources: SourceServiceDep,
+    session: SessionDep,
+) -> SourceStatus:
+    await service.get(tutor_id)
+    source = await sources.get_source(tutor_id, source_id)
+    info = await sources.refresh(source)
+    await session.commit()
+    return SourceStatus.model_validate(info, from_attributes=True)
+
+
+# --- conversations ---------------------------------------------------------
+
+
+@router.get(
+    "/{tutor_id}/sessions",
+    response_model=list[SessionSummary],
+    summary="Conversas recentes deste tutor",
+    description=(
+        "Inspecao das ultimas sessoes, com as mensagens de cada uma. Existe para demonstrar e "
+        "depurar o comportamento do agente sem ler o banco na mao."
+    ),
+)
+async def list_tutor_sessions(
+    tutor_id: str,
+    service: TutorServiceDep,
+    chats: ChatRepositoryDep,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> list[SessionSummary]:
+    await service.get(tutor_id)
+    sessions = await chats.recent_sessions_for_tutor(tutor_id, limit=limit)
+
+    return [
+        SessionSummary(
+            id=chat_session.id,
+            origin=chat_session.origin,
+            created_at=chat_session.created_at,
+            last_seen_at=chat_session.last_seen_at,
+            message_count=len(chat_session.messages),
+            messages=[MessageRead.model_validate(message) for message in chat_session.messages],
+        )
+        for chat_session in sessions
+    ]

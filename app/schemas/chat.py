@@ -67,3 +67,18 @@ class ChatResponse(BaseModel):
     content: str
     citations: list[dict[str, Any]]
     tool_calls: list[dict[str, Any]]
+
+
+class SessionSummary(BaseModel):
+    """One past conversation, for the administrator's inspection view.
+
+    Administrative, not public: it carries the origin and the full transcript, neither of which
+    belongs in a response the widget can read.
+    """
+
+    id: str
+    origin: str
+    created_at: datetime
+    last_seen_at: datetime
+    message_count: int
+    messages: list[MessageRead]

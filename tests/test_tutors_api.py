@@ -270,3 +270,90 @@ async def test_removing_a_source_from_another_tutor_returns_404(
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "SOURCE_NOT_FOUND"
+
+
+# --- source health ---------------------------------------------------------
+
+
+async def test_source_status_reports_what_the_agent_can_actually_read(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    """A source that looks fine in the list may still be unreadable by the fetcher."""
+    tutor = await _create(client, auth_headers)
+    await client.post(
+        f"/api/v1/tutors/{tutor['id']}/sources",
+        json={
+            "kind": "inline_text",
+            "label": "Politica",
+            "content": "# Politica\n\n## Ferias\nTrinta dias.",
+        },
+        headers=auth_headers,
+    )
+
+    response = await client.get(
+        f"/api/v1/tutors/{tutor['id']}/sources/status", headers=auth_headers
+    )
+
+    assert response.status_code == 200
+    status = response.json()[0]
+    assert status["label"] == "Politica"
+    assert status["available"] is True
+    assert status["characters"] > 0
+    assert status["error"] is None
+
+
+async def test_source_status_surfaces_a_blocked_url_at_configuration_time(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    """The whole point: discover the broken source in the panel, not during a conversation."""
+    tutor = await _create(client, auth_headers)
+    await client.post(
+        f"/api/v1/tutors/{tutor['id']}/sources",
+        json={"kind": "url", "label": "Interna", "url": "http://127.0.0.1:9/segredo.md"},
+        headers=auth_headers,
+    )
+
+    response = await client.get(
+        f"/api/v1/tutors/{tutor['id']}/sources/status", headers=auth_headers
+    )
+
+    status = response.json()[0]
+    assert status["available"] is False
+    assert status["error"]
+
+
+async def test_refreshing_a_source_ignores_the_cache_ttl(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    tutor = await _create(client, auth_headers)
+    added = await client.post(
+        f"/api/v1/tutors/{tutor['id']}/sources",
+        json={"kind": "inline_text", "label": "Politica", "content": "# A\n\nTexto."},
+        headers=auth_headers,
+    )
+
+    response = await client.post(
+        f"/api/v1/tutors/{tutor['id']}/sources/{added.json()['id']}/refresh",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+
+
+async def test_refreshing_an_unknown_source_is_a_404(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    tutor = await _create(client, auth_headers)
+
+    response = await client.post(
+        f"/api/v1/tutors/{tutor['id']}/sources/inexistente/refresh", headers=auth_headers
+    )
+
+    assert response.status_code == 404
+
+
+async def test_source_status_requires_authentication(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/tutors/qualquer/sources/status")
+
+    assert response.status_code == 401

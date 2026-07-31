@@ -66,6 +66,24 @@ class SourceRead(BaseModel):
     created_at: datetime
 
 
+class SourceStatus(BaseModel):
+    """What the administrator needs to know about a source *as the agent sees it*.
+
+    A URL that the fetcher refuses (private address, wrong content type, 404) used to look
+    identical in the panel to one that works, and only revealed itself when a user asked a
+    question. This is that difference, made visible.
+    """
+
+    source_id: str
+    label: str
+    kind: str
+    url: str | None
+    characters: int
+    section_count: int
+    available: bool
+    error: str | None
+
+
 class TutorCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

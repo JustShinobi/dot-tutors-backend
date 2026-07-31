@@ -126,6 +126,16 @@ def get_source_service(
     return SourceService(session=session, settings=settings, http_client=http_client)
 
 
+SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
+
+
+def get_chat_repository(session: SessionDep) -> ChatRepository:
+    return ChatRepository(session)
+
+
+ChatRepositoryDep = Annotated[ChatRepository, Depends(get_chat_repository)]
+
+
 def get_agent_runner(request: Request) -> AgentRunner:
     """The agent runner built once at startup (building it creates the model client).
 
@@ -147,7 +157,7 @@ def get_chat_service(
     session: SessionDep,
     settings: SettingsDep,
     embeds: EmbedServiceDep,
-    sources: Annotated[SourceService, Depends(get_source_service)],
+    sources: SourceServiceDep,
     runner: Annotated[AgentRunner, Depends(get_agent_runner)],
 ) -> ChatService:
     return ChatService(
@@ -231,7 +241,9 @@ def prune_rate_limiters(*, older_than_seconds: float = 3_600) -> int:
     """Drop idle buckets across every limiter.
 
     Each distinct key allocates an entry and the keys include client IPs, so without this a
-    long-running process facing many clients leaks memory slowly.
+    long-running process facing many clients leaks memory slowly. Called from the retention
+    script and from the readiness path, both of which run often enough to matter and rarely
+    enough to be free.
     """
     return sum(
         limiter.prune(older_than_seconds=older_than_seconds) for limiter in _limiters.values()

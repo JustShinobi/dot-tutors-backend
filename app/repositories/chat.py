@@ -31,6 +31,21 @@ class ChatRepository:
         self._session.add(chat_session)
         return chat_session
 
+    async def recent_sessions_for_tutor(self, tutor_id: str, *, limit: int) -> list[ChatSession]:
+        """Most recently active sessions of a tutor, with their messages.
+
+        The messages are eager-loaded because the caller serialises them immediately; leaving
+        them lazy would fire one query per session from inside an async context.
+        """
+        result = await self._session.execute(
+            select(ChatSession)
+            .where(ChatSession.tutor_id == tutor_id)
+            .order_by(ChatSession.last_seen_at.desc())
+            .limit(limit)
+            .options(selectinload(ChatSession.messages))
+        )
+        return list(result.scalars().unique())
+
     # --- messages ----------------------------------------------------------
 
     async def recent_messages(self, session_id: str, *, limit: int) -> list[ChatMessage]:

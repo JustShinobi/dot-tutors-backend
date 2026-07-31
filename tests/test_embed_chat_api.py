@@ -670,3 +670,34 @@ async def test_preflight_is_answered_for_the_embed_api(client: AsyncClient) -> N
     assert response.headers["access-control-allow-origin"] == CLIENT_ORIGIN
     assert "POST" in response.headers["access-control-allow-methods"]
     assert "Authorization" in response.headers["access-control-allow-headers"]
+
+
+# --- administrative inspection ---------------------------------------------
+
+
+async def test_an_admin_can_inspect_the_conversations_of_a_tutor(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    """Demonstrating the agent should not require reading the database by hand."""
+    tutor_id, public_key = await _seed_embed(client, auth_headers)
+    session = await _open_session(client, public_key)
+    await client.post(
+        "/api/v1/embed/chat",
+        json={"message": "Qual o valor do auxilio?", "stream": False},
+        headers=_bearer(session),
+    )
+
+    response = await client.get(f"/api/v1/tutors/{tutor_id}/sessions", headers=auth_headers)
+
+    assert response.status_code == 200
+    conversations = response.json()
+    assert len(conversations) == 1
+    assert conversations[0]["origin"] == CLIENT_ORIGIN
+    assert conversations[0]["message_count"] == 2
+    assert [message["role"] for message in conversations[0]["messages"]] == ["user", "assistant"]
+
+
+async def test_conversation_inspection_is_administrator_only(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/tutors/qualquer/sessions")
+
+    assert response.status_code == 401
