@@ -30,7 +30,18 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -e ".[dev]"
+        # The `langgraph` extra is included so the comparative runner is linted, typed and
+        # importable here too. It ships in the repository, and the one file written to
+        # demonstrate rigour should not be the only file the gate skips.
+        run: pip install -e ".[dev,langgraph]"
+
+      - name: Default install needs no optional extra
+        # Guards the property the extra exists to preserve: nothing on the default path may
+        # start importing LangChain. A clean environment that can import the app proves it.
+        run: |
+          python -m venv /tmp/base-install
+          /tmp/base-install/bin/pip install -q -e .
+          /tmp/base-install/bin/python -c "import app.main; print('import da aplicacao OK sem o extra')"
 
       - name: Knowledge strategy guard (PRD 6.2 / 7.4)
         # Runs first and on its own: if a vector database ever creeps in, that is the finding,
