@@ -99,3 +99,40 @@ comentário explicando por que um domínio reservado não serve — para o próx
 **Lição.** Um placeholder plausível não é um placeholder válido. Vale rodar o caminho real (migrar,
 seed, subir a API e autenticar de verdade) e não só a suíte de testes: foi o que confirmou o
 fluxo completo depois da correção.
+
+---
+
+## #6 — BM25 tornava documentos curtos silenciosamente impesquisáveis
+
+**Problema.** A busca lexical filtrava resultados por `score > 0`, o que parece óbvio e está
+errado. O termo IDF do BM25 fica **negativo** quando a palavra aparece na maior parte do corpus —
+e num documento curto, que vira um ou dois chunks, esse é o caso normal. Consequência: um FAQ
+pequeno ou uma política enxuta retornavam **zero trechos**, e o tutor responderia "não encontrei
+essa informação" com a resposta bem na frente. Nenhuma exceção, nenhum log de erro.
+
+**Como apareceu.** Um teste de segurança (conteúdo hostil delimitado como dado) falhou por um
+motivo completamente diferente do que investigava: a busca por "instrucoes" num texto que continha
+a palavra devolveu nada. Vale registrar que o teste que pegou o bug não era o teste do bug.
+
+**Correção.** A relevância passou a ser decidida por **sobreposição de tokens**, e o BM25 ficou
+responsável apenas por **ordenar** os candidatos. Isso separa duas perguntas que estavam
+indevidamente unidas: "este trecho é candidato?" (contém algum termo da busca) e "qual vem
+primeiro?" (score). Dois testes de regressão fixam o comportamento — um documento de chunk único
+é pesquisável, e continua rejeitando uma busca não relacionada.
+
+---
+
+## #7 — A primeira palavra de toda resposta era descartada
+
+**Problema.** O tradutor de eventos do streaming tratava apenas `PartDeltaEvent`. No Pydantic AI, o
+primeiro pedaço de texto chega num `PartStartEvent` e só as continuações vêm como delta. Toda
+resposta do tutor sairia sem a palavra inicial.
+
+**Como apareceu.** Pelo teste que monta a resposta em pedaços e compara a concatenação com o texto
+esperado (`assert ' em partes.' == 'Resposta em partes.'`). Um fake que entregasse a resposta num
+único pedaço teria passado e escondido o bug — por isso o modelo de teste emite palavra por
+palavra de propósito.
+
+**Lição aplicada.** Fakes devem imitar a *forma* do protocolo real, não só o resultado final. Foi o
+mesmo princípio que exigiu trocar `FunctionModel(função)` por `FunctionModel(stream_function=...)`:
+o caminho de streaming é outro código, e testá-lo pelo caminho não-streaming não prova nada.
