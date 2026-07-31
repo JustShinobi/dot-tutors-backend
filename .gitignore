@@ -29,3 +29,6 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+
+# Logs locais
+*.log
