@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import httpx
 from fastapi import FastAPI
 
 from app.agent.runner import build_runner
 from app.api.cors import DualPolicyCORSMiddleware
+from app.api.deps import prune_rate_limiters
 from app.api.error_handlers import register_error_handlers
 from app.api.middleware import RequestContextMiddleware
 from app.api.security_headers import RequestSizeLimitMiddleware, SecurityHeadersMiddleware
@@ -60,18 +62,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         agent_ready=runner_ready,
         llm_model=settings.llm_model,
         database="sqlite" if settings.is_sqlite else "postgresql",
+        trusted_proxy_hops=settings.trusted_proxy_hops,
+        docs_enabled=settings.docs_enabled,
     )
+    # Unlike data retention — which is a cron entry, because a background thread would run once
+    # per replica and duplicate the work — the rate-limit buckets live *in this process*. Per
+    # process is exactly the right scope, so this one belongs here.
+    pruner = asyncio.create_task(_prune_rate_limiters_periodically())
+
     try:
         yield
     finally:
+        pruner.cancel()
+        with suppress(asyncio.CancelledError):
+            await pruner
         await app.state.http_client.aclose()
         await app.state.engine.dispose()
         logger.info("application_stopped")
 
 
+async def _prune_rate_limiters_periodically(*, every_seconds: float = 900) -> None:
+    """Drop idle rate-limit buckets so the dictionary cannot grow without bound.
+
+    Every distinct client IP allocates an entry; without this, a long-running process facing
+    many clients leaks memory slowly and invisibly.
+    """
+    while True:
+        await asyncio.sleep(every_seconds)
+        dropped = prune_rate_limiters()
+        if dropped:
+            logger.info("rate_limit_buckets_pruned", dropped=dropped)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    configure_logging(level=settings.log_level, json_output=settings.log_format == "json")
+    configure_logging(level=settings.log_level, json_output=settings.resolved_log_format == "json")
+
+    # The schema enumerates every administrative route and payload, so it is off by default once
+    # deployed. `EXPOSE_API_DOCS=true` turns it back on for a demo that wants it browsable.
+    docs_enabled = settings.docs_enabled
 
     app = FastAPI(
         title="DOT Tutors API",
@@ -80,9 +109,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "API de gestao de tutores e runtime de conversacao para widget incorporavel via iframe."
         ),
         lifespan=lifespan,
-        docs_url="/docs",
+        docs_url="/docs" if docs_enabled else None,
         redoc_url=None,
-        openapi_url="/openapi.json",
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
     app.state.settings = settings
 

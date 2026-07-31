@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     (nginx, Traefik, Caddy) set `1`.
     """
 
+    expose_api_docs: bool | None = None
+    """`None` = enabled only outside staging/production. Set explicitly to publish `/docs`
+    on a deployed demo."""
+
     # --- observability -----------------------------------------------------
     logfire_token: str = ""
 
@@ -143,6 +147,29 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    @property
+    def docs_enabled(self) -> bool:
+        """Whether to publish `/docs` and `/openapi.json`.
+
+        Off by default in a deployed environment: the schema lists every administrative route
+        and its payloads, which is free reconnaissance. A demo that *wants* the interactive docs
+        turns them back on explicitly.
+        """
+        if self.expose_api_docs is not None:
+            return self.expose_api_docs
+        return self.app_env in ("local", "test")
+
+    @property
+    def resolved_log_format(self) -> LogFormat:
+        """JSON once deployed, human-readable while developing.
+
+        Structured output only pays off where something ingests it; a colourised console is
+        better on a laptop. Setting `LOG_FORMAT` explicitly always wins.
+        """
+        if "log_format" in self.model_fields_set:
+            return self.log_format
+        return "json" if self.app_env in ("staging", "production") else "console"
 
 
 def _split_csv(raw: str) -> list[str]:
