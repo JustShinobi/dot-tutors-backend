@@ -48,6 +48,18 @@ class EmbedKeyRead(BaseModel):
     last_used_at: datetime | None
 
 
+class EmbedConfig(BaseModel):
+    """Public framing policy of a key.
+
+    Contains no information about the tutor or its content: only who may frame the widget page,
+    which is exactly what the frontend needs to build its `frame-ancestors` header.
+    """
+
+    allowed_origins: list[str]
+    allows_any_origin: bool
+    is_active: bool
+
+
 class EmbedSnippet(BaseModel):
     """Everything an integrator needs to embed the tutor (PRD 3.2)."""
 

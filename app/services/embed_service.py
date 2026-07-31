@@ -147,6 +147,18 @@ class EmbedService:
             notes=notes,
         )
 
+    async def describe_key(self, public_key: str) -> EmbedKey:
+        """Look up a key without opening a session.
+
+        Used to build the widget page's framing policy. It answers for revoked keys too: the
+        page must still refuse to be framed, and hiding that would only turn a clear error into
+        a blank iframe.
+        """
+        key = await self._keys.get_by_public_key(public_key)
+        if key is None:
+            raise EmbedKeyNotFoundError
+        return key
+
     # --- runtime authorisation --------------------------------------------
 
     async def authorize(self, public_key: str, origin: str | None) -> tuple[EmbedKey, Tutor]:

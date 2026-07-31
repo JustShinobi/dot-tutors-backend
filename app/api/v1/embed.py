@@ -22,6 +22,7 @@ from app.agent.contracts import AgentEvent, AgentEventKind
 from app.api.deps import (
     ChatServiceDep,
     CurrentEmbedSession,
+    EmbedServiceDep,
     OriginDep,
     SessionDep,
     SettingsDep,
@@ -39,6 +40,7 @@ from app.schemas.chat import (
     SessionResponse,
     TutorPublicProfile,
 )
+from app.schemas.embed import EmbedConfig
 
 logger = get_logger(__name__)
 
@@ -90,6 +92,26 @@ async def open_session(
             greeting=tutor.greeting,
         ),
         history=[MessageRead.model_validate(message) for message in history],
+    )
+
+
+@router.get(
+    "/config",
+    response_model=EmbedConfig,
+    summary="Configuracao publica de uma chave de embed",
+    description=(
+        "Consumida pelo frontend para montar o cabecalho Content-Security-Policy "
+        "(frame-ancestors) da pagina do widget. Nao abre sessao e nao expoe nada sobre o "
+        "conteudo do tutor: apenas quais origens podem enquadrar a pagina."
+    ),
+    responses={404: {"description": "Chave de embed invalida"}},
+)
+async def get_embed_config(embed_key: str, service: EmbedServiceDep) -> EmbedConfig:
+    key = await service.describe_key(embed_key)
+    return EmbedConfig(
+        allowed_origins=list(key.allowed_origins),
+        allows_any_origin=key.allows_any_origin,
+        is_active=key.is_active,
     )
 
 

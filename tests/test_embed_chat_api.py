@@ -175,6 +175,57 @@ async def test_an_admin_token_cannot_be_used_as_a_session_token(
     assert response.status_code == 401
 
 
+# --- framing policy --------------------------------------------------------
+
+
+async def test_embed_config_exposes_only_the_framing_policy(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    """Feeds the frontend's `frame-ancestors` header; must leak nothing about the tutor."""
+    _, public_key = await _seed_embed(client, auth_headers)
+
+    response = await client.get(f"/api/v1/embed/config?embed_key={public_key}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "allowed_origins": [CLIENT_ORIGIN],
+        "allows_any_origin": False,
+        "is_active": True,
+    }
+    assert "Politica" not in response.text
+
+
+async def test_embed_config_reports_a_key_without_an_allowlist(
+    client: AsyncClient, auth_headers: Headers, settings: Settings
+) -> None:
+    """"Any origin" must be distinguishable from "unknown", or the CSP cannot be built."""
+    settings.embed_default_origins = ""
+    _, public_key = await _seed_embed(client, auth_headers, origins=[])
+
+    body = (await client.get(f"/api/v1/embed/config?embed_key={public_key}")).json()
+
+    assert body["allows_any_origin"] is True
+
+
+async def test_embed_config_still_answers_for_a_revoked_key(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    tutor_id, public_key = await _seed_embed(client, auth_headers)
+    keys = await client.get(f"/api/v1/tutors/{tutor_id}/embed-keys", headers=auth_headers)
+    await client.post(f"/api/v1/embed-keys/{keys.json()[0]['id']}/revoke", headers=auth_headers)
+
+    body = (await client.get(f"/api/v1/embed/config?embed_key={public_key}")).json()
+
+    assert body["is_active"] is False
+
+
+async def test_embed_config_of_an_unknown_key_is_404(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/embed/config?embed_key=pk_live_nao_existe")
+
+    assert response.status_code == 404
+
+
 # --- chat ------------------------------------------------------------------
 
 
