@@ -235,3 +235,99 @@ model falso implementando a interface do LangChain).
 **Conclusão honesta registrada no README:** nada disso faz do LangGraph uma ferramenta ruim. Ele é
 forte para grafos com estado. É apenas mais maquinaria do que um único loop de tool-calling
 precisa — que é exatamente o que este PRD pede.
+
+---
+
+## #13 — O tratador de erro do SSE morria antes de emitir o erro
+
+**Contexto.** Uma revisão do próprio código encontrou o bug mais sério do projeto, e ele estava
+exatamente no bloco escrito para lidar com falhas — que é onde a suíte não olhava, porque os
+runners engolem as próprias exceções e emitem `event: error` sozinhos. O caminho de último
+recurso do transporte nunca era exercitado.
+
+**O bug.** Em `_event_stream`:
+
+```python
+except Exception:
+    await session.rollback()
+    logger.exception("chat_stream_failed", session_id=chat_session.id)  # ← estoura aqui
+```
+
+`rollback()` expira todas as instâncias ORM. Ler `chat_session.id` logo depois dispara um
+lazy-load síncrono dentro do contexto de streaming, e o SQLAlchemy levanta `MissingGreenlet`. O
+`event: error` nunca era emitido: a resposta simplesmente abortava no meio.
+
+**Como apareceu.** Reproduzindo o cenário "subiu sem `GEMINI_API_KEY`". A lifespan deixa
+`agent_runner = None` de propósito, para o painel continuar funcionando — mas aí o serviço
+chamava `.stream()` em `None`, e o `AttributeError` caía justamente naquele `except`.
+
+**As duas correções.** Ler o `session_id` **antes** do `try` resolve o sintoma. A causa foi
+tratada onde de fato estava: `get_agent_runner` agora recusa a requisição com `503
+AGENT_UNAVAILABLE` — numa *dependência*, antes de a resposta começar —, então o cliente recebe um
+erro de verdade em vez de um stream que abre e morre.
+
+**A metade do cliente.** O parser de SSE do frontend saía do laço quando o stream fechava sem
+`done` nem `error`, sem chamar handler nenhum: a bolha ficava "escrevendo…" para sempre. Agora um
+stream sem evento terminal vira `STREAM_INCOMPLETE`.
+
+**Lição registrada.** Um bloco `except` também é código, e testes que só exercitam o caminho feliz
+do erro (aqui: a falha que o *runner* trata) não cobrem a falha que passa por fora dele. Três
+testes novos garantem os dois transportes e o caso do modelo não configurado.
+
+---
+
+## #14 — Configuração administrativa que ninguém lia
+
+**Contexto.** `model_settings` aceitava `model`, `temperature`, `max_tool_calls` e
+`max_output_tokens`, validava os quatro, persistia os quatro — e o runner só lia
+`max_tool_calls`. O comentário no modelo dizia "Overrides the global defaults".
+
+**Decisão.** Implementar, não remover: são úteis e já estavam documentados como se funcionassem.
+`ModelOverrides` traduz a coluna JSON para algo tipado, e os dois runners aplicam. Um modelo
+injetado (os testes) ignora o override de modelo, para um tutor não conseguir apontar a suíte
+para um provider real.
+
+**Detalhe que só apareceu ao escrever o teste.** Em Python `True` é `int`, então
+`max_output_tokens: true` viraria `1` silenciosamente. A conversão rejeita `bool` explicitamente,
+e há teste para isso.
+
+---
+
+## #15 — `gather` sobre uma sessão do SQLAlchemy: quase um bug
+
+**Contexto.** O catálogo de fontes é montado a cada turno, carregando todas as fontes em série.
+Com cache frio isso custa um timeout **por fonte** antes do primeiro token, o que pode estourar o
+timeout do agente sozinho.
+
+**Primeira tentativa, errada.** `asyncio.gather(*(self.load(s) for s in sources))`. Escrevi
+inclusive um comentário afirmando que as escritas seriam "serializadas pelo lock da sessão". Não
+são: `AsyncSession` não é segura para uso concorrente e levanta `IllegalStateChangeError` em vez
+de enfileirar.
+
+**Correção.** `load_many` em três fases — planejar (banco, sequencial), buscar (rede, concorrente),
+persistir (banco, sequencial). Só a fase do meio vai para o `gather`, e é onde estão os segundos.
+
+**Lição.** O comentário estava mais errado que o código, e teria sobrevivido à revisão por
+soar plausível. Concorrência é onde "parece certo" é a armadilha mais cara.
+
+---
+
+## #16 — A cerca anti-SSRF checava um nome e conectava em outro
+
+**Contexto.** `assert_public_url` resolvia o host e validava os IPs; depois o httpx resolvia de
+novo para conectar. Duas resoluções independentes — a janela clássica de DNS rebinding: um
+servidor autoritativo hostil com TTL de um segundo responde a primeira com IP público e a segunda
+com `169.254.169.254`.
+
+**Correção.** A validação agora **devolve** os endereços, e a conexão é feita no endereço
+validado, com o hostname original preservado no header `Host` e no `sni_hostname` — assim o
+virtual hosting continua roteando e o certificado TLS continua sendo verificado contra o nome, não
+contra um IP.
+
+**Validação.** Antes de aceitar, testei contra as fontes reais do seed (as PEPs, inclusive num
+redirecionamento `http → https`). Um "endurecimento" que quebrasse o fetch de produção seria pior
+que a limitação declarada.
+
+**Nota de bastidor.** Os primeiros testes usaram `203.0.113.0/24` como "IP público de exemplo" —
+faixa que o Python classifica como privada desde a 3.12, então a própria cerca os rejeitava. Foi
+o teste falhando por motivo certo pelo caminho errado.

@@ -14,6 +14,7 @@ Expõe a API de administração de tutores e o runtime de conversação orquestr
 
 - [Arquitetura](#arquitetura)
 - [Como rodar localmente](#como-rodar-localmente)
+- [Deploy com Docker](#deploy-com-docker)
 - [Variáveis de ambiente](#variáveis-de-ambiente)
 - [Fluxo de embed ponta a ponta](#fluxo-de-embed-ponta-a-ponta)
 - [Decisões de arquitetura](#decisões-de-arquitetura)
@@ -104,9 +105,10 @@ uvicorn app.main:app --reload
 
 API em <http://localhost:8000>, documentação interativa em `/docs`.
 
-O seed cria o administrador e dois tutores de demonstração: um com fontes HTTP públicas e
-estáveis (PEP 20 e PEP 8) e outro com uma política interna fictícia em texto — para o agente ter
-material real para pesquisar sem depender de nenhum ativo privado.
+O seed cria o administrador, dois tutores de demonstração — um com fontes HTTP públicas e estáveis
+(PEP 20 e PEP 8) e outro com uma política interna fictícia em texto — **e uma chave de embed**,
+imprimindo o link pronto de demonstração. É o caminho mais curto entre `git clone` e um widget
+respondendo dentro de um iframe.
 
 Com `uv` (opcional): `uv sync && uv run uvicorn app.main:app --reload`.
 
@@ -126,6 +128,51 @@ alembic upgrade head
 de cron; não há agendador no processo de propósito, porque uma thread de fundo dentro da API
 rodaria uma vez por réplica.
 
+(Os buckets de rate limit são a exceção: vivem *dentro* de um processo, então são limpos por uma
+tarefa de fundo — por processo é exatamente o escopo certo para eles.)
+
+---
+
+## Deploy com Docker
+
+A pilha completa — PostgreSQL, API e frontend — sobe com um comando. Pensada para uma VM ou LXC
+atrás de um proxy reverso que termina TLS; os dois serviços escutam apenas em `127.0.0.1`, quem
+publica na rede é o proxy.
+
+```bash
+cp .env.deploy.example .env.deploy    # ajuste URLs públicas, segredos e GEMINI_API_KEY
+docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d --build
+docker compose -f docker-compose.deploy.yml --env-file .env.deploy logs api | grep "Chave de embed"
+```
+
+O container aplica as migrations e roda o seed no boot (ambos idempotentes), e o seed **imprime a
+chave de embed e o link pronto de demonstração** — não é preciso criar nada pelo painel para ver o
+widget funcionando.
+
+Três pontos que costumam morder num deploy assim:
+
+| Ponto | O que fazer |
+|---|---|
+| **`TRUSTED_PROXY_HOPS`** | `1` com um proxy na frente. Se ficar em `0`, todos os visitantes compartilham o IP do proxy e o primeiro esgota o rate limit de todo mundo |
+| **`PUBLIC_API_URL`** | Entra no bundle do frontend em **tempo de build**: mudar exige `--build`, não basta reiniciar |
+| **Buffering do proxy** | O SSE precisa passar sem buffer. No nginx: `proxy_buffering off;` na rota da API (o backend já envia `X-Accel-Buffering: no`) |
+
+Exemplo mínimo de nginx para a rota da API:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;          # sem isto o streaming chega todo de uma vez
+    proxy_read_timeout 120s;      # maior que AGENT_TIMEOUT_SECONDS
+}
+```
+
+`Dockerfile` e `docker-compose.deploy.yml` são construídos e testados no CI a cada push: a imagem
+precisa subir e responder `/healthz` para o build passar.
+
 ---
 
 ## Variáveis de ambiente
@@ -144,6 +191,8 @@ mais importam:
 | `HISTORY_MAX_MESSAGES` | `20` | Mensagens reproduzidas no contexto |
 | `ADMIN_ORIGIN` | `http://localhost:3000` | Origem autorizada na API administrativa |
 | `EMBED_DEFAULT_ORIGINS` | `http://localhost:3000` | Allowlist padrão ao criar uma chave |
+| `TRUSTED_PROXY_HOPS` | `0` | Quantos proxies reversos existem na frente. `1` atrás de nginx/Traefik/Caddy |
+| `EXPOSE_API_DOCS` | vazio | Vazio = `/docs` só fora de staging/production. `true` publica mesmo assim |
 
 Os placeholders de `JWT_SECRET` e `SEED_ADMIN_PASSWORD` fazem a aplicação **recusar subir** com
 `APP_ENV=staging` ou `production` — para o valor de exemplo nunca chegar a um ambiente real.
@@ -286,25 +335,50 @@ todo integrador legítimo. A autorização fica onde deve estar — no `Origin` 
 allowlist, que responde `403` antes de qualquer trabalho. Credenciais ficam desligadas, porque o
 token viaja no header `Authorization` e nunca em cookie.
 
-**Outras defesas.** Fetcher com cerca anti-SSRF (só http/https, IPs públicos, revalidado a cada
-redirecionamento, teto de bytes aplicado durante o streaming), respostas de erro sem stack trace
-com `request_id` correlacionável, limite de tamanho de requisição e headers de resposta
-(`nosniff`, `no-referrer`, `X-Frame-Options: DENY` na própria API).
+**Revogação tem efeito imediato.** Um token de sessão vale por todo o seu TTL, então revogar uma
+chave só significaria alguma coisa se a sessão fosse reconferida. Ela é: cada mensagem revalida a
+chave e a origem gravada contra a allowlist atual. Tirar um domínio da lista derruba as conversas
+em andamento daquele domínio, sem esperar 30 minutos.
+
+**Força bruta no login.** `POST /auth/login` é o único endpoint que verifica senha e tem limite
+por IP. A checagem vem **antes** da verificação — bcrypt é lento de propósito, o que torna
+tentativas ilimitadas também um vetor de exaustão de CPU.
+
+**Atrás de proxy reverso.** `TRUSTED_PROXY_HOPS` diz quantos proxies existem na frente. Com `0`
+(padrão) o `X-Forwarded-For` é ignorado, porque é um header que o cliente controla e confiar nele
+sem proxy daria um bucket de rate limit novo a cada requisição. Com `1`, o endereço é lido a uma
+posição da direita da cadeia — as entradas da esquerda são forjáveis, as da direita foram
+acrescentadas pela sua infraestrutura.
+
+**Outras defesas.** Fetcher com cerca anti-SSRF: só http/https, IPs públicos, revalidado a cada
+redirecionamento, teto de bytes aplicado durante o streaming — e **conexão fixada no endereço que
+acabou de ser validado**, com o hostname preservado no `Host` e no SNI. Sem essa fixação, checar e
+conectar são duas resoluções de DNS diferentes, e um servidor hostil com TTL de um segundo
+responde a primeira com um IP público e a segunda com `169.254.169.254`. Além disso: respostas de
+erro sem stack trace com `request_id` correlacionável, limite de tamanho de requisição, headers de
+resposta (`nosniff`, `no-referrer`, `X-Frame-Options: DENY` na própria API) e `/docs` desligado
+fora de desenvolvimento (`EXPOSE_API_DOCS` religa quando a demonstração pede).
 
 ---
 
 ## Testes e qualidade
 
 ```bash
-pytest              # 210 testes
+pytest              # 280 testes, cobertura ~90%
 ruff check .        # lint
 ruff format --check .
 mypy app scripts    # tipagem estrita
 python scripts/check_no_vector_deps.py
 ```
 
-Tudo isso roda no CI a cada push e pull request, mais `alembic check` para pegar um modelo
-alterado sem migração.
+Tudo isso roda no CI a cada push e pull request, em três jobs:
+
+1. **Lint, tipos e testes** em SQLite, com piso de cobertura e `alembic check` para pegar um
+   modelo alterado sem migração.
+2. **PostgreSQL**: as migrations sobem e descem, e o seed roda contra o dialeto real. Sem este
+   job, "o schema é agnóstico de dialeto" seria uma afirmação de README que nada verifica.
+3. **Imagem de contêiner**: a imagem é construída e precisa responder `/healthz` — o arquivo que
+   vai a produção não pode ser o único que ninguém executa.
 
 Os testes rodam contra um **SQLite real em memória** — constraints, unicidade e cascade são
 exercitados de verdade, sem mock de ORM e sem servidor externo. Os testes do agente exercitam o
@@ -317,18 +391,20 @@ loop real com o modelo substituído.
 Declaradas, não escondidas:
 
 - **Rate limit em memória.** Não sobrevive a restart nem é compartilhado entre réplicas: um
-  deploy horizontal multiplicaria o limite pelo número de instâncias.
+  deploy horizontal multiplicaria o limite pelo número de instâncias. Os buckets ociosos são
+  descartados periodicamente para o dicionário não crescer sem limite.
 - **Prompt injection mitigada, não resolvida.** Conteúdo de fonte vai delimitado por `<fonte>` com
   instrução explícita de tratá-lo como dado. Um documento hostil ainda é uma superfície de risco.
 - **Sem multi-tenant.** Um único papel administrativo, sem isolamento entre organizações (§6.3).
-- **Sem retry/backoff nas chamadas ao LLM.** Uma falha transitória vira erro para o usuário.
 - **Histórico limitado a N mensagens**, sem sumarização do que fica fora da janela.
-- **Cache de fonte por TTL**, sem invalidação por webhook.
-- **CSP do widget sem `script-src`.** Travá-lo sob Next exige nonce por requisição em cada tag de
-  script; a primeira tentativa quebrou a hidratação da página. Ficou como próximo passo em vez de
-  ser fingido com `'unsafe-inline'`.
-- **Sem Dockerfile da API.** Não havia Docker no ambiente de desenvolvimento, e entregar um
-  arquivo nunca executado seria pior do que não entregar.
+- **Cache de fonte por TTL**, sem invalidação por webhook — mas há um endpoint de reprocessamento
+  manual (`POST /tutors/{id}/sources/{sid}/refresh`) para não depender de esperar o TTL.
+- **Sessão do admin sem refresh token.** Expirado o access token, é preciso logar de novo.
+- **Migrations rodam no boot do container.** Correto para uma instância; com réplicas isso vira
+  corrida e o certo é um job separado no pipeline. É por isso que o passo é uma flag
+  (`RUN_MIGRATIONS_ON_START`), não um comportamento fixo.
+- **Um único provider de LLM.** `LLM_PROVIDER` só aceita `google`; trocar exige um caso a mais em
+  `build_model`.
 
 ---
 
@@ -339,14 +415,14 @@ Declaradas, não escondidas:
 - API keys server-to-server (`sk_`) com hash em repouso, escopos e rotação; log de auditoria.
 - Rotação e expiração automática de embed keys.
 - Secret manager no lugar de `.env`.
-- CSP completa do widget com nonce por requisição.
+- Refresh token para o painel administrativo.
 
 **Escala e confiabilidade**
-- Rate limit e cache de fontes em Redis.
+- Rate limit e cache de fontes em Redis (hoje em memória, por processo).
 - Ingestão de fontes assíncrona, com agendamento e invalidação por webhook.
-- Retry com backoff e circuit breaker nas chamadas de LLM e de fetch.
+- Circuit breaker nas chamadas de LLM e de fetch (o retry com backoff já existe).
 - Particionamento de `chat_messages` por data; réplicas de leitura.
-- Dockerfile e pipeline de deploy com migrations versionadas.
+- Migrations como job separado do boot, para suportar múltiplas réplicas.
 
 **Produto**
 - Versionamento de tutores com preview e rollback.
