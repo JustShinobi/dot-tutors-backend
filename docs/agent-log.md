@@ -173,3 +173,65 @@ do código foi o que o quebrou.
 **Correção.** `model` sobe para o nível da resposta e `content` fica só com a mídia adicional.
 
 **Lição.** Testes de fumaça baratos pagam por si mesmos em momentos que não se pode prever.
+
+---
+
+## #10 — Nenhuma foreign key era aplicada no banco padrão
+
+**Problema.** O teste da rotina de retenção falhou por um motivo inesperado: apagadas as sessões
+expiradas, **as mensagens continuavam lá**. Investigando: o SQLite **ignora foreign keys a menos
+que sejam explicitamente habilitadas**, por conexão, e o padrão é desligado.
+
+A consequência era muito maior que o teste: **todos os `ondelete="CASCADE"` do schema eram
+decorativos** no banco local. Remover um tutor deixaria fontes, chaves, sessões e mensagens
+órfãs — e a rotina de retenção, que existe para eliminar conteúdo de conversa, apagaria só a
+casca. O PostgreSQL aplica as constraints nativamente, então o problema era invisível em qualquer
+ambiente com paridade de produção, e sistemático em todos os outros.
+
+**Correção.** Um listener de `connect` emite `PRAGMA foreign_keys=ON` para toda conexão SQLite.
+É a mudança que faz os dois dialetos realmente se comportarem igual, em vez de apenas parecerem.
+
+**Por que só apareceu agora.** Nenhum teste anterior exercitava exclusão em massa; os cascades
+que passaram usavam o ORM, que emula o comportamento em Python e mascarava a ausência da
+constraint no banco. Vale o registro: *o teste que passa pelo ORM não prova nada sobre o banco.*
+
+---
+
+## #11 — Duas correções que o teste de hardening extraiu
+
+**`request_id` nulo justamente no 500.** O corpo de erro trazia `request_id: null` exatamente na
+resposta em que ele mais importa. Causa: o Starlette executa o handler de último recurso no
+`ServerErrorMiddleware`, **fora** da task onde o middleware de contexto define a contextvar. O
+identificador aparecia no log e sumia da resposta — quebrando justamente a ponte entre o que o
+usuário vê e o que está registrado. Passou a ser lido de `request.state`, que não depende de
+contexto.
+
+**Erro fora do alcance do handler.** O middleware de limite de payload levantava um `AppError`,
+mas roda **fora** da pilha de exception handlers — o erro escapava como 500 genérico, com um
+formato de corpo diferente de todo o resto da API. Agora ele constrói a resposta diretamente,
+mantendo um único contrato de erro.
+
+Ambos são a mesma lição em versões diferentes: **a ordem do middleware não é detalhe de
+configuração**, ela decide o que o handler enxerga.
+
+---
+
+## #12 — O runner LangGraph, e o que a comparação de fato mostrou
+
+**Contexto.** A decisão D1 (Pydantic AI) foi tomada na primeira iteração. Uma justificativa
+escrita antes de existir código é uma opinião; a fase final implementou o **mesmo agente em
+LangGraph**, atrás da mesma interface `AgentRunner`, para transformá-la em comparação.
+
+**Resultado mais relevante — e não era o esperado.** O ganho não estava em nenhum dos dois
+frameworks, e sim no fato de a camada de conhecimento **não ter se movido**: `SourceService` e
+`app/agent/tools.py` ficaram intactos, só a fiação mudou. Isso valida retroativamente a decisão
+de escrever as ferramentas como lógica de domínio em vez de artefato de framework — e é o que
+tornou a troca uma tarde de trabalho em vez de uma reescrita.
+
+**Onde o custo apareceu.** Streaming (um iterador tipado contra `astream_events` com mapeamento
+por string, que falha só em runtime) e teste (poucas linhas com `FunctionModel` contra um chat
+model falso implementando a interface do LangChain).
+
+**Conclusão honesta registrada no README:** nada disso faz do LangGraph uma ferramenta ruim. Ele é
+forte para grafos com estado. É apenas mais maquinaria do que um único loop de tool-calling
+precisa — que é exatamente o que este PRD pede.
