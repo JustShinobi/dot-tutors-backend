@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     admin_access_token_ttl_minutes: int = 30
     embed_session_ttl_minutes: int = 30
-    seed_admin_email: str = "admin@dot.local"
+    seed_admin_email: str = "admin@example.com"
     seed_admin_password: str = _PLACEHOLDER_ADMIN_PASSWORD
 
     # --- llm ---------------------------------------------------------------
