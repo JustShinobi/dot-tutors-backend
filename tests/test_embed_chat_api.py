@@ -199,7 +199,7 @@ async def test_embed_config_exposes_only_the_framing_policy(
 async def test_embed_config_reports_a_key_without_an_allowlist(
     client: AsyncClient, auth_headers: Headers, settings: Settings
 ) -> None:
-    """"Any origin" must be distinguishable from "unknown", or the CSP cannot be built."""
+    """ "Any origin" must be distinguishable from "unknown", or the CSP cannot be built."""
     settings.embed_default_origins = ""
     _, public_key = await _seed_embed(client, auth_headers, origins=[])
 
