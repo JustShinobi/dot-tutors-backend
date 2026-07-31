@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -30,7 +31,31 @@ def create_engine(settings: Settings) -> AsyncEngine:
     else:
         engine_kwargs |= {"pool_pre_ping": True, "pool_size": 5, "max_overflow": 10}
 
-    return create_async_engine(settings.database_url, connect_args=connect_args, **engine_kwargs)
+    engine = create_async_engine(settings.database_url, connect_args=connect_args, **engine_kwargs)
+
+    if settings.is_sqlite:
+        _enforce_sqlite_foreign_keys(engine)
+
+    return engine
+
+
+def _enforce_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+    """Turn on foreign key enforcement for every SQLite connection.
+
+    **SQLite ignores foreign keys unless asked**, per connection, and the default is off. Without
+    this every `ondelete="CASCADE"` in the schema is decorative on the default database: deleting
+    a tutor or an expired session would leave its messages behind as orphans — that is, the
+    conversation content would survive the retention routine that claims to remove it.
+
+    PostgreSQL enforces constraints natively, so this is the change that makes the two dialects
+    actually behave alike, rather than only appearing to.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragma(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
