@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 
     # --- llm ---------------------------------------------------------------
     llm_provider: str = "google"
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3.6-flash"
     gemini_api_key: str = ""
 
     # --- agent -------------------------------------------------------------

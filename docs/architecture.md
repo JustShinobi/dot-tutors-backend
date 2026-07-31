@@ -12,13 +12,13 @@ Material de apoio exigido pelo PRD §8.1.
                                             │ (1) carrega iframe
                                             ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  FRONTEND — Next.js 15 (App Router, TS, Tailwind)      repo: *-frontend       │
+│  FRONTEND — Next.js 16 (App Router, TS, Tailwind)      repo: *-frontend       │
 │                                                                              │
 │  /login  /tutors  /tutors/new  /tutors/[id]  /tutors/[id]/embed   ← ADMIN    │
 │  /embed/[embedKey]                                          ← WIDGET (iframe)│
 │  /demo                                        ← página host de demonstração  │
 │                                                                              │
-│  middleware.ts → CSP frame-ancestors por tutor (consulta o backend)          │
+│  middleware.ts → CSP frame-ancestors por tutor (consulta /embed/config)       │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │ (2) POST /embed/session {embed_key} + Origin
                                 │ (3) POST /embed/chat  (SSE)  Bearer <session_token>
@@ -48,7 +48,7 @@ Material de apoio exigido pelo PRD §8.1.
 │        ▼                         ▼                        ▼                 │
 │  ┌───────────────┐   ┌────────────────────┐    ┌────────────────────┐      │
 │  │ SQLite / PG   │   │ Fetcher HTTP       │    │ Google Gemini API  │      │
-│  │ tutors        │   │ (SSRF guard,       │    │ gemini-2.5-flash   │      │
+│  │ tutors        │   │ (SSRF guard,       │    │ gemini-3.6-flash   │      │
 │  │ sources+cache │   │  timeout, maxbytes)│    └────────────────────┘      │
 │  │ embed_keys    │   └─────────┬──────────┘                                │
 │  │ sessions      │             │                                            │

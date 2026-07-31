@@ -72,7 +72,7 @@ Expõe a API de administração de tutores e o runtime de conversação orquestr
 │        ▼                         ▼                        ▼                 │
 │  ┌───────────────┐   ┌────────────────────┐    ┌────────────────────┐      │
 │  │ SQLite / PG   │   │ Fetcher HTTP       │    │ Google Gemini API  │      │
-│  │ tutors        │   │ (SSRF guard,       │    │ gemini-2.5-flash   │      │
+│  │ tutors        │   │ (SSRF guard,       │    │ gemini-3.6-flash   │      │
 │  │ sources+cache │   │  timeout, maxbytes)│    └────────────────────┘      │
 │  │ embed_keys    │   └─────────┬──────────┘                                │
 │  │ sessions      │             │                                            │
@@ -137,7 +137,7 @@ mais importam:
 |---|---|---|
 | `DATABASE_URL` | SQLite local | Troque para `postgresql+asyncpg://...` para usar Postgres |
 | `GEMINI_API_KEY` | vazio | Sem ela a API sobe, mas o chat responde erro claro |
-| `LLM_MODEL` | `gemini-2.5-flash` | Modelo usado pelo agente |
+| `LLM_MODEL` | `gemini-3.6-flash` | Modelo usado pelo agente |
 | `AGENT_RUNNER` | `pydantic_ai` | `langgraph` ativa a implementação comparativa |
 | `AGENT_MAX_TOOL_CALLS` | `6` | Teto de ferramentas por resposta |
 | `AGENT_TIMEOUT_SECONDS` | `45` | Timeout total de uma execução |
@@ -185,7 +185,7 @@ Integrador   Widget(iframe)      Backend                Agente          Fonte/LL
 | D4 | Auth do admin (§4.1.2) | **JWT HS256** | Permite expiração e claims de papel sem tabela de sessão. |
 | D5 | Auth do embed (§3.4) | **Chave pública + allowlist de origem + token de sessão curto** | Ver [Segurança do modelo de embed](#segurança-do-modelo-de-embed) |
 | D6 | Estratégia de conhecimento (§4.3.2) | **Tools agênticas + BM25 lexical** | Ver seção dedicada |
-| D7 | LLM | **Google Gemini** (`gemini-2.5-flash`) | Provider e modelo por env. |
+| D7 | LLM | **Google Gemini** (`gemini-3.6-flash`) | Provider e modelo por env. |
 | D8 | Rate limit (§5.1) | Token bucket em memória | Simples e suficiente para demo; a limitação está declarada, não escondida. |
 | D9 | CORS (§5.1) | Política dupla em middleware próprio | Ver seção de segurança |
 
