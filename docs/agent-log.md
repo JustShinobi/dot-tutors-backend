@@ -78,3 +78,24 @@ núcleo da estratégia de conhecimento. Uma afirmação no README não é verifi
 banida aparecer no `pyproject.toml` ou (b) um símbolo de embedding for importado por
 `app/` — inclusive a API de embeddings que o próprio `pydantic-ai` oferece e que **não** é usada
 aqui. O script roda no pre-commit e no CI, transformando o critério de aceite em teste executável.
+
+---
+
+## #5 — O admin do seed não conseguia fazer login
+
+**Problema.** O placeholder `admin@dot.local` foi usado no `.env.example`, no default do `Settings`
+e nos testes. A rota de login valida o e-mail com `EmailStr`, e o `email-validator` **recusa
+domínios de uso especial** (`.local`, `.localhost`, `.invalid`, RFC 6762/2606). Resultado: o
+administrador criado pelo seed recebia `422` em toda tentativa de login — o demo inteiro ficaria
+inacessível.
+
+**Como apareceu.** Não por leitura do código: os testes de API quebraram em massa, todos com `422`
+onde se esperava `200`, e a fixture de token derrubou 18 testes por arrasto.
+
+**Correção.** Todos os placeholders passaram para `admin@example.com` (`example.com` é reservado
+pela RFC 2606 exatamente para documentação e passa na validação), e o `.env.example` ganhou um
+comentário explicando por que um domínio reservado não serve — para o próximo leitor não repetir.
+
+**Lição.** Um placeholder plausível não é um placeholder válido. Vale rodar o caminho real (migrar,
+seed, subir a API e autenticar de verdade) e não só a suíte de testes: foi o que confirmou o
+fluxo completo depois da correção.
