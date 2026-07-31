@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
+
 import httpx
 import pytest
 import respx
 
 from app.core.errors import SourceFetchError
-from app.utils.http_fetch import UnsafeUrlError, assert_public_url, fetch_text
+from app.utils.http_fetch import UnsafeUrlError, _pin, assert_public_url, fetch_text
 
 PUBLIC_URL = "https://exemplo-publico.test/doc.md"
 
@@ -59,7 +61,108 @@ def test_non_http_schemes_are_blocked(url: str) -> None:
 
 
 def test_the_fence_can_be_opened_explicitly_for_local_development() -> None:
-    assert_public_url("http://127.0.0.1:9999/doc.md", allow_private_network=True)
+    assert assert_public_url("http://127.0.0.1:9999/doc.md", allow_private_network=True) == []
+
+
+# --- DNS rebinding ---------------------------------------------------------
+
+
+def test_pinning_connects_to_the_validated_address_not_the_name() -> None:
+    """Checking a name and then connecting by name are two lookups; only the first is verified."""
+    connect_url, headers, extensions = _pin(
+        "https://exemplo.test/doc.md", [ipaddress.ip_address("93.184.216.34")]
+    )
+
+    assert connect_url == "https://93.184.216.34/doc.md"
+    # The name still has to reach the server, or virtual hosting and TLS both break.
+    assert headers["Host"] == "exemplo.test"
+    assert extensions["sni_hostname"] == "exemplo.test"
+
+
+def test_pinning_keeps_a_non_default_port_in_the_host_header() -> None:
+    connect_url, headers, _ = _pin(
+        "http://exemplo.test:8080/doc.md", [ipaddress.ip_address("93.184.216.34")]
+    )
+
+    assert connect_url == "http://93.184.216.34:8080/doc.md"
+    assert headers["Host"] == "exemplo.test:8080"
+
+
+def test_pinning_brackets_an_ipv6_literal() -> None:
+    connect_url, headers, _ = _pin(
+        "https://exemplo.test/doc.md", [ipaddress.ip_address("2001:db8::1")]
+    )
+
+    assert connect_url == "https://[2001:db8::1]/doc.md"
+    assert headers["Host"] == "exemplo.test"
+
+
+def test_an_opened_fence_does_not_pin() -> None:
+    """Local development points at names that resolve privately; pinning there helps nobody."""
+    assert _pin("http://localhost:8000/doc.md", []) == ("http://localhost:8000/doc.md", {}, {})
+
+
+@respx.mock
+async def test_fetch_requests_the_pinned_address(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a rebind after the check cannot redirect the connection."""
+    monkeypatch.setattr(
+        "app.utils.http_fetch._resolve", lambda host: [ipaddress.ip_address("93.184.216.34")]
+    )
+    route = respx.get("https://93.184.216.34/doc.md").mock(
+        return_value=httpx.Response(200, text="conteudo", headers={"content-type": "text/plain"})
+    )
+
+    document = await fetch_text(
+        "https://exemplo.test/doc.md", client=client, max_bytes=10_000, timeout_seconds=5
+    )
+
+    assert document.text == "conteudo"
+    assert route.called
+    assert route.calls.last.request.headers["Host"] == "exemplo.test"
+    assert route.calls.last.request.extensions["sni_hostname"] == "exemplo.test"
+
+
+@respx.mock
+async def test_a_redirect_is_pinned_to_its_own_resolution(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each hop resolves and pins separately — the first host says nothing about the second."""
+    resolutions = {
+        "exemplo.test": ipaddress.ip_address("93.184.216.34"),
+        "destino.test": ipaddress.ip_address("93.184.216.35"),
+    }
+    monkeypatch.setattr("app.utils.http_fetch._resolve", lambda host: [resolutions[host]])
+
+    respx.get("https://93.184.216.34/doc.md").mock(
+        return_value=httpx.Response(302, headers={"location": "https://destino.test/final.md"})
+    )
+    final = respx.get("https://93.184.216.35/final.md").mock(
+        return_value=httpx.Response(200, text="destino", headers={"content-type": "text/plain"})
+    )
+
+    document = await fetch_text(
+        "https://exemplo.test/doc.md", client=client, max_bytes=10_000, timeout_seconds=5
+    )
+
+    assert document.text == "destino"
+    assert final.calls.last.request.headers["Host"] == "destino.test"
+
+
+def test_a_rebind_to_an_internal_address_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.utils.http_fetch._resolve",
+        lambda host: [
+            ipaddress.ip_address("93.184.216.34"),
+            ipaddress.ip_address("169.254.169.254"),
+        ],
+    )
+
+    # Every returned address must be public: one internal answer in the set is enough to refuse,
+    # because the client could otherwise pick it.
+    with pytest.raises(UnsafeUrlError):
+        assert_public_url("https://exemplo.test/doc.md")
 
 
 # --- fetching --------------------------------------------------------------
