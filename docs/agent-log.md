@@ -136,3 +136,40 @@ palavra de propósito.
 **Lição aplicada.** Fakes devem imitar a *forma* do protocolo real, não só o resultado final. Foi o
 mesmo princípio que exigiu trocar `FunctionModel(função)` por `FunctionModel(stream_function=...)`:
 o caminho de streaming é outro código, e testá-lo pelo caminho não-streaming não prova nada.
+
+---
+
+## #8 — Toda requisição de chat quebrava no banco padrão
+
+**Problema.** `TypeError: can't compare offset-naive and offset-aware datetimes` ao validar a
+expiração da sessão. Causa: **o SQLite não tem tipo com fuso horário** e devolve o timestamp
+naive, enquanto `utcnow()` é aware. No PostgreSQL, com `timestamptz`, o mesmo código funciona.
+
+Ou seja: um bug que aparece **apenas na configuração padrão** — a que qualquer avaliador vai usar
+primeiro — e que contradizia diretamente a decisão D3, que promete um schema agnóstico de dialeto.
+
+**Correção.** Um `TypeDecorator` (`UtcDateTime`) normaliza na fronteira do banco: grava sempre em
+UTC e devolve sempre aware, em qualquer dialeto. A alternativa — espalhar conversões defensivas
+pelos serviços — trataria o sintoma em cada ponto de uso e deixaria o próximo timestamp exposto.
+`alembic check` confirmou que o DDL gerado não mudou, então não houve migração nova.
+
+**Lição.** "Roda em SQLite e em PostgreSQL" não é uma afirmação de configuração, é uma afirmação
+que precisa de teste. Os testes rodam em SQLite justamente por isso.
+
+---
+
+## #9 — O `/openapi.json` inteiro quebrava por um `model` no lugar errado
+
+**Problema.** Ao declarar que a rota de chat responde tanto `text/event-stream` quanto
+`application/json`, o schema do Pydantic foi colocado dentro de `content`
+(`{"application/json": {"model": ChatResponse}}`). O FastAPI não interpreta `model` nesse nível:
+ele tentava serializar a *classe* e explodia com `PydanticSerializationError`, derrubando a
+geração de todo o documento OpenAPI — inclusive o `/docs`.
+
+**Como apareceu.** Pelo teste de fumaça `test_openapi_schema_is_served`, escrito na primeira fase
+como algo quase trivial. Foi o único teste da suíte que pegou isso, e uma rota nova em outra área
+do código foi o que o quebrou.
+
+**Correção.** `model` sobe para o nível da resposta e `content` fica só com a mídia adicional.
+
+**Lição.** Testes de fumaça baratos pagam por si mesmos em momentos que não se pode prever.

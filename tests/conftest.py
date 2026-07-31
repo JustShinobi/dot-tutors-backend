@@ -11,8 +11,12 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic_ai import ModelMessage
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from app.agent.pydantic_ai_runner import PydanticAIRunner
+from app.api.deps import reset_rate_limiters
 from app.core.config import Settings
 from app.core.security import hash_password
 from app.db.base import Base
@@ -82,16 +86,37 @@ async def admin_user(session: AsyncSession) -> AdminUser:
 
 
 @pytest.fixture
-async def app(settings: Settings, engine: AsyncEngine) -> FastAPI:
-    """App wired to the *same* engine as the `session` fixture.
+def agent_model() -> FunctionModel:
+    """Default fake LLM: answers without calling any tool.
 
-    Without this, the test would set up data on one engine and the request would read from
-    another, and every assertion about persisted state would be meaningless.
+    Tests that care about the knowledge loop override this fixture with their own script.
     """
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        yield "Resposta de teste."
+
+    return FunctionModel(stream_function=respond)
+
+
+@pytest.fixture
+async def app(
+    settings: Settings, engine: AsyncEngine, agent_model: FunctionModel
+) -> AsyncIterator[FastAPI]:
+    """App wired to the *same* engine as the `session` fixture, and to a fake LLM.
+
+    Without sharing the engine, the test would set up data on one connection pool and the
+    request would read from another, making every assertion about persisted state meaningless.
+    """
+    reset_rate_limiters()
+
     application = create_app(settings)
     application.state.engine = engine
     application.state.session_factory = create_session_factory(engine)
-    return application
+
+    async with application.router.lifespan_context(application):
+        # Replace the runner built at startup: no API key, no network, no token spend.
+        application.state.agent_runner = PydanticAIRunner(settings=settings, model=agent_model)
+        yield application
 
 
 @pytest.fixture
