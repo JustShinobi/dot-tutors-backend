@@ -71,17 +71,50 @@ A sessão vive em `sessionStorage`, isolada por aba e por site hospedeiro. Cada 
 
 ---
 
-## 4. Limitações que valem conhecer
+## 4. Ajuste automático de altura (opcional)
+
+Por padrão o iframe usa a altura fixa do snippet e o widget rola internamente. Se preferir que
+ele acompanhe o tamanho da conversa, o widget publica a altura do conteúdo por `postMessage`.
+
+```html
+<iframe id="tutor" src="https://app.exemplo.com/embed/pk_live_abc123" width="400" height="620"
+        style="border:0;border-radius:12px"></iframe>
+
+<script>
+  const WIDGET_ORIGIN = "https://app.exemplo.com";
+  const iframe = document.getElementById("tutor");
+
+  window.addEventListener("message", (event) => {
+    // Obrigatório: qualquer frame pode postar nesta janela, então o tipo da mensagem
+    // sozinho não prova nada. Sem esta linha, qualquer site consegue redimensionar o seu.
+    if (event.origin !== WIDGET_ORIGIN) return;
+    if (event.data?.type !== "dot-tutor:resize") return;
+
+    // Limite o crescimento: assim o widget nunca domina a sua página.
+    iframe.height = Math.min(Math.max(event.data.height, 240), 900);
+  });
+</script>
+```
+
+A mensagem tem o formato `{ type: "dot-tutor:resize", height: number, embedKey: string }`. O
+`embedKey` vem junto para uma página que incorpore mais de um tutor conseguir distinguir os
+frames. Ignorar a mensagem é uma opção legítima — nada quebra.
+
+Implementação de referência do lado do host: `components/embed/ResizingEmbed.tsx` no repositório
+do frontend, usada pela própria página `/demo`.
+
+---
+
+## 5. Limitações que valem conhecer
 
 - **A conversa é anônima.** Não há login do usuário final; o histórico dura enquanto a aba
   estiver aberta.
 - **Sem cookies.** O widget não usa cookie algum, justamente porque navegadores bloqueiam cookie
   de terceiro dentro de iframe. Nada a declarar em banner de cookies por causa dele.
-- **Altura fixa.** O iframe não se redimensiona sozinho. Ajuste `height` conforme o seu layout.
 
 ---
 
-## 5. Fluxo, para quem quiser entender por baixo
+## 6. Fluxo, para quem quiser entender por baixo
 
 ```
 Seu site            Widget (iframe)          Backend
