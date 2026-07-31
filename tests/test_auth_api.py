@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 from httpx import AsyncClient
 
+from app.api.deps import reset_rate_limiters
 from app.core.config import Settings
 from app.core.security import TokenAudience, _encode, create_embed_session_token
 from app.db.models.admin import AdminUser
@@ -130,3 +131,52 @@ async def test_error_responses_never_leak_internals(client: AsyncClient) -> None
     assert set(body["error"]) <= {"code", "message", "request_id", "details"}
     assert "Traceback" not in response.text
     assert response.headers["X-Request-ID"]
+
+
+# --- brute force -----------------------------------------------------------
+
+
+async def test_login_attempts_are_rate_limited(
+    client: AsyncClient, admin_user: AdminUser, settings: Settings
+) -> None:
+    """The only endpoint that verifies a password must not accept unbounded attempts."""
+    settings.rate_limit_login_per_minute = 3
+    reset_rate_limiters()
+
+    statuses = [
+        (
+            await client.post(
+                "/api/v1/auth/login",
+                json={"email": ADMIN_EMAIL, "password": "senha-errada"},
+            )
+        ).status_code
+        for _ in range(4)
+    ]
+
+    assert statuses[:3] == [401, 401, 401]
+    assert statuses[3] == 429
+
+
+async def test_the_login_limit_also_blocks_the_correct_password(
+    client: AsyncClient, admin_user: AdminUser, settings: Settings
+) -> None:
+    """The check runs before the password is verified, so guessing right does not escape it.
+
+    It also protects the CPU: bcrypt is deliberately slow, which makes unbounded login attempts
+    an exhaustion vector on their own.
+    """
+    settings.rate_limit_login_per_minute = 2
+    reset_rate_limiters()
+
+    for _ in range(2):
+        await client.post(
+            "/api/v1/auth/login", json={"email": ADMIN_EMAIL, "password": "senha-errada"}
+        )
+
+    blocked = await client.post(
+        "/api/v1/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
+    )
+
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "RATE_LIMITED"
+    assert int(blocked.headers["Retry-After"]) > 0

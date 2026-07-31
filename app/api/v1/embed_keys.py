@@ -48,7 +48,10 @@ async def list_embed_keys(tutor_id: str, service: EmbedServiceDep) -> list[Embed
     "/embed-keys/{key_id}/revoke",
     response_model=EmbedKeyRead,
     summary="Revoga uma chave de embed",
-    description="Sessoes ja abertas continuam validas ate expirarem; novas sao recusadas.",
+    description=(
+        "Efeito imediato: alem de recusar novas sessoes, as sessoes ja abertas com esta chave "
+        "param de responder na proxima mensagem."
+    ),
     responses={404: {"description": "Chave nao encontrada"}},
 )
 async def revoke_embed_key(

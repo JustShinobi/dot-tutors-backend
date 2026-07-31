@@ -15,17 +15,19 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.agent.contracts import AgentEvent, AgentEventKind
 from app.api.deps import (
     ChatServiceDep,
+    ClientIpDep,
     CurrentEmbedSession,
     EmbedServiceDep,
     OriginDep,
     SessionDep,
     SettingsDep,
+    embed_ip_rate_limiter,
     embed_rate_limiter,
     session_rate_limiter,
 )
@@ -65,13 +67,13 @@ router = APIRouter(prefix="/api/v1/embed", tags=["embed"])
 )
 async def open_session(
     payload: SessionCreate,
-    request: Request,
     origin: OriginDep,
     service: ChatServiceDep,
     settings: SettingsDep,
     session: SessionDep,
+    caller_ip: ClientIpDep,
 ) -> SessionResponse:
-    session_rate_limiter(settings).check(_client_key(request))
+    session_rate_limiter(settings).check(caller_ip)
 
     chat_session, tutor, history = await service.open_session(payload, origin=origin)
     token, expires_in = create_embed_session_token(
@@ -151,13 +153,16 @@ async def list_messages(
 )
 async def chat(
     payload: ChatRequest,
-    request: Request,
     chat_session: CurrentEmbedSession,
     service: ChatServiceDep,
     settings: SettingsDep,
     session: SessionDep,
+    caller_ip: ClientIpDep,
 ) -> Response:
+    # Two ceilings, because they bound different things: the first caps one conversation, the
+    # second caps a caller who keeps opening new ones to escape the first.
     embed_rate_limiter(settings).check(chat_session.id)
+    embed_ip_rate_limiter(settings).check(f"{chat_session.embed_key_id}:{caller_ip}")
 
     if not payload.stream:
         return await _answer_json(payload, chat_session, service, session)
@@ -295,8 +300,3 @@ def _tool_dict(call: Any) -> dict[str, Any]:
         "duration_ms": call.duration_ms,
         "ok": call.ok,
     }
-
-
-def _client_key(request: Request) -> str:
-    client = request.client
-    return client.host if client else "desconhecido"

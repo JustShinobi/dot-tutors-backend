@@ -77,6 +77,21 @@ class Settings(BaseSettings):
     # --- rate limit --------------------------------------------------------
     rate_limit_chat_per_minute: int = 20
     rate_limit_session_per_minute: int = 10
+    rate_limit_chat_per_ip_per_minute: int = 60
+    """Ceiling per (embed key, IP). The per-session limit alone is trivially bypassed by
+    opening new sessions, so the two work together."""
+    rate_limit_login_per_minute: int = 5
+    """The admin login is the only password-checking endpoint; without this it is an open
+    brute-force target."""
+
+    # --- deployment --------------------------------------------------------
+    trusted_proxy_hops: int = 0
+    """How many reverse proxies sit in front of the API.
+
+    `0` means the app is reached directly and `X-Forwarded-For` must be ignored — trusting it
+    then would let any client forge its own IP and defeat every per-IP limit. Behind one proxy
+    (nginx, Traefik, Caddy) set `1`.
+    """
 
     # --- observability -----------------------------------------------------
     logfire_token: str = ""

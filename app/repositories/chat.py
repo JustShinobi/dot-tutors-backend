@@ -20,7 +20,10 @@ class ChatRepository:
         result = await self._session.execute(
             select(ChatSession)
             .where(ChatSession.id == session_id)
-            .options(selectinload(ChatSession.tutor))
+            # The embed key is loaded eagerly because every request re-checks it: a revoked key
+            # or a shrunken origin allowlist has to stop an *already open* session, not just
+            # the next one.
+            .options(selectinload(ChatSession.tutor), selectinload(ChatSession.embed_key))
         )
         return result.scalar_one_or_none()
 

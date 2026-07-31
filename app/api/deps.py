@@ -15,6 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.contracts import AgentRunner
+from app.api.client_ip import client_ip
 from app.core.config import Settings
 from app.core.errors import AgentUnavailableError, AuthenticationError, SessionExpiredError
 from app.core.logging import get_logger
@@ -185,29 +186,67 @@ CurrentEmbedSession = Annotated[ChatSession, Depends(require_embed_session)]
 # Held at module level so the buckets survive between requests. They are per-process, which is
 # the documented limitation of the in-memory approach (see `app/core/rate_limit.py`).
 
-_chat_limiter: TokenBucketLimiter | None = None
-_session_limiter: TokenBucketLimiter | None = None
+_limiters: dict[str, TokenBucketLimiter] = {}
+
+
+def _limiter(name: str, capacity: int) -> TokenBucketLimiter:
+    """Fetch (or rebuild) a named bucket set.
+
+    Rebuilding when the capacity changes is what lets a test tighten a limit and see it take
+    effect without reaching into module state.
+    """
+    existing = _limiters.get(name)
+    if existing is None or existing.capacity != capacity:
+        existing = TokenBucketLimiter(capacity=capacity)
+        _limiters[name] = existing
+    return existing
 
 
 def embed_rate_limiter(settings: Settings) -> TokenBucketLimiter:
-    global _chat_limiter
-    if _chat_limiter is None or _chat_limiter.capacity != settings.rate_limit_chat_per_minute:
-        _chat_limiter = TokenBucketLimiter(capacity=settings.rate_limit_chat_per_minute)
-    return _chat_limiter
+    """Per conversation session."""
+    return _limiter("chat_session", settings.rate_limit_chat_per_minute)
+
+
+def embed_ip_rate_limiter(settings: Settings) -> TokenBucketLimiter:
+    """Per (embed key, IP).
+
+    The per-session bucket alone caps one conversation; nothing stops a script from opening a
+    new session for each message. This is the ceiling that actually bounds the LLM spend an
+    integrator's page can trigger.
+    """
+    return _limiter("chat_ip", settings.rate_limit_chat_per_ip_per_minute)
 
 
 def session_rate_limiter(settings: Settings) -> TokenBucketLimiter:
-    global _session_limiter
-    if (
-        _session_limiter is None
-        or _session_limiter.capacity != settings.rate_limit_session_per_minute
-    ):
-        _session_limiter = TokenBucketLimiter(capacity=settings.rate_limit_session_per_minute)
-    return _session_limiter
+    """Per IP, on session creation."""
+    return _limiter("session_open", settings.rate_limit_session_per_minute)
+
+
+def login_rate_limiter(settings: Settings) -> TokenBucketLimiter:
+    """Per IP, on the admin login — the only endpoint that verifies a password."""
+    return _limiter("login", settings.rate_limit_login_per_minute)
+
+
+def prune_rate_limiters(*, older_than_seconds: float = 3_600) -> int:
+    """Drop idle buckets across every limiter.
+
+    Each distinct key allocates an entry and the keys include client IPs, so without this a
+    long-running process facing many clients leaks memory slowly.
+    """
+    return sum(
+        limiter.prune(older_than_seconds=older_than_seconds) for limiter in _limiters.values()
+    )
 
 
 def reset_rate_limiters() -> None:
     """Clear limiter state. Used by tests so one case cannot exhaust another's budget."""
-    global _chat_limiter, _session_limiter
-    _chat_limiter = None
-    _session_limiter = None
+    _limiters.clear()
+
+
+def get_client_ip(request: Request) -> str:
+    """The caller's address, honouring `X-Forwarded-For` only when a proxy is configured."""
+    settings: Settings = request.app.state.settings
+    return client_ip(request, trusted_proxy_hops=settings.trusted_proxy_hops)
+
+
+ClientIpDep = Annotated[str, Depends(get_client_ip)]

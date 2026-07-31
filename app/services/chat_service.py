@@ -22,7 +22,12 @@ from app.agent.contracts import (
     HistoryMessage,
 )
 from app.core.config import Settings
-from app.core.errors import SessionExpiredError, TutorInactiveError
+from app.core.errors import (
+    EmbedKeyRevokedError,
+    OriginNotAllowedError,
+    SessionExpiredError,
+    TutorInactiveError,
+)
 from app.core.logging import get_logger
 from app.db.base import utcnow
 from app.db.models.chat import ChatMessage, ChatSession, MessageRole
@@ -31,6 +36,7 @@ from app.repositories.chat import ChatRepository
 from app.schemas.chat import SessionCreate
 from app.services.embed_service import EmbedService
 from app.services.source_service import SourceService
+from app.utils.origins import origin_matches
 
 logger = get_logger(__name__)
 
@@ -83,9 +89,34 @@ class ChatService:
         return chat_session, tutor, []
 
     async def resolve_session(self, session_id: str) -> ChatSession:
+        """Re-authorise an open session on every request.
+
+        A session token is a bearer credential valid for its whole TTL, so anything an
+        administrator revokes has to be re-checked here — otherwise "revoke this key" would
+        really mean "revoke it in up to `EMBED_SESSION_TTL_MINUTES`", which is not what the word
+        promises and not what a demo of it would show.
+        """
         chat_session = await self._chats.get_session(session_id)
         if chat_session is None or chat_session.is_expired():
             raise SessionExpiredError
+
+        key = chat_session.embed_key
+        if not key.is_active:
+            logger.info(
+                "embed_session_key_revoked", session_id=chat_session.id, embed_key_id=key.id
+            )
+            raise EmbedKeyRevokedError
+
+        # The origin recorded when the session opened is re-tested against the *current*
+        # allowlist, so removing a domain takes effect immediately.
+        if not origin_matches(chat_session.origin or None, key.allowed_origins):
+            logger.warning(
+                "embed_session_origin_revoked",
+                session_id=chat_session.id,
+                embed_key_id=key.id,
+                origin=chat_session.origin,
+            )
+            raise OriginNotAllowedError
 
         if not chat_session.tutor.is_active:
             raise TutorInactiveError

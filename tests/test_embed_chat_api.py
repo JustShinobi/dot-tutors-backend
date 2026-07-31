@@ -9,9 +9,12 @@ from typing import Any
 from httpx import AsyncClient
 from pydantic_ai import ModelMessage
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import reset_rate_limiters
 from app.core.config import Settings
+from app.db.models.embed import EmbedKey
 
 Headers = dict[str, str]
 CLIENT_ORIGIN = "https://cliente.com"
@@ -524,7 +527,80 @@ async def test_an_unconfigured_model_is_refused_before_the_stream_opens(
     assert response.headers["content-type"].startswith("application/json")
 
 
+# --- revocation takes effect on open sessions ------------------------------
+
+
+async def test_revoking_a_key_stops_a_session_that_is_already_open(
+    client: AsyncClient, auth_headers: Headers
+) -> None:
+    """Otherwise "revoke" would mean "revoke in up to EMBED_SESSION_TTL_MINUTES"."""
+    tutor_id, public_key = await _seed_embed(client, auth_headers)
+    session = await _open_session(client, public_key)
+
+    keys = await client.get(f"/api/v1/tutors/{tutor_id}/embed-keys", headers=auth_headers)
+    key_id = keys.json()[0]["id"]
+    revoked = await client.post(f"/api/v1/embed-keys/{key_id}/revoke", headers=auth_headers)
+    assert revoked.status_code == 200
+
+    response = await client.post(
+        "/api/v1/embed/chat", json={"message": "oi", "stream": False}, headers=_bearer(session)
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "EMBED_KEY_REVOKED"
+
+
+async def test_removing_an_origin_stops_a_session_that_is_already_open(
+    client: AsyncClient, auth_headers: Headers, session: AsyncSession
+) -> None:
+    """The demo removes a domain from the allowlist; it has to bite without a reload."""
+    tutor_id, public_key = await _seed_embed(client, auth_headers)
+    embed_session = await _open_session(client, public_key)
+
+    keys = await client.get(f"/api/v1/tutors/{tutor_id}/embed-keys", headers=auth_headers)
+    key_id = keys.json()[0]["id"]
+
+    # Written through the ORM rather than through a route: what is under test is the per-request
+    # re-check, and the PRD never asked for an "edit allowlist" endpoint to reach it.
+    key = (await session.execute(select(EmbedKey).where(EmbedKey.id == key_id))).scalar_one()
+    key.allowed_origins = ["https://outro-cliente.com"]
+    await session.commit()
+
+    response = await client.post(
+        "/api/v1/embed/chat",
+        json={"message": "oi", "stream": False},
+        headers=_bearer(embed_session),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ORIGIN_NOT_ALLOWED"
+
+
 # --- rate limiting ---------------------------------------------------------
+
+
+async def test_the_per_ip_limit_survives_opening_new_sessions(
+    client: AsyncClient, auth_headers: Headers, settings: Settings
+) -> None:
+    """The per-session ceiling alone is escaped by opening a session per message."""
+    settings.rate_limit_chat_per_ip_per_minute = 3
+    settings.rate_limit_chat_per_minute = 100
+    reset_rate_limiters()
+
+    _, public_key = await _seed_embed(client, auth_headers)
+
+    statuses = []
+    for _ in range(4):
+        session = await _open_session(client, public_key)
+        response = await client.post(
+            "/api/v1/embed/chat",
+            json={"message": "oi", "stream": False},
+            headers=_bearer(session),
+        )
+        statuses.append(response.status_code)
+
+    assert statuses[:3] == [200, 200, 200]
+    assert statuses[3] == 429
 
 
 async def test_the_chat_rate_limit_answers_429_with_retry_after(
