@@ -28,8 +28,11 @@ dependencies = [
 # Optional on purpose: the LangGraph runner exists to justify decision D1 by comparison, not to
 # be required at runtime. Nothing in the default install depends on it.
 langgraph = [
-    "langgraph>=0.2",
-    "langchain-core>=0.3",
+    # `langchain` (not just `langgraph`) because v1 moved the agent factory to
+    # `langchain.agents.create_agent`; `langgraph.prebuilt.create_react_agent` is deprecated.
+    "langchain>=1.0",
+    "langgraph>=1.0",
+    "langchain-core>=1.0",
     "langchain-google-genai>=2.0",
 ]
 dev = [

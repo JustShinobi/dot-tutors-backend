@@ -27,12 +27,14 @@ It is simply more machinery than a single tool-calling loop needs.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.prebuilt import create_react_agent
 
 from app.agent import tools as knowledge_tools
 from app.agent.contracts import (
@@ -50,25 +52,28 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _build_model(settings: Settings) -> BaseChatModel:
+    if settings.llm_provider != "google":
+        raise AgentExecutionError(
+            f"LLM_PROVIDER={settings.llm_provider!r} nao suportado.",
+            code="LLM_PROVIDER_UNSUPPORTED",
+        )
+    if not settings.gemini_api_key:
+        raise AgentExecutionError("GEMINI_API_KEY nao configurada.", code="LLM_NOT_CONFIGURED")
+
+    return ChatGoogleGenerativeAI(model=settings.llm_model, google_api_key=settings.gemini_api_key)
+
+
 class LangGraphRunner:
     """`AgentRunner` implementation backed by LangGraph's prebuilt ReAct agent."""
 
     name = "langgraph"
 
-    def __init__(self, *, settings: Settings) -> None:
-        if settings.llm_provider != "google":
-            raise AgentExecutionError(
-                f"LLM_PROVIDER={settings.llm_provider!r} nao suportado.",
-                code="LLM_PROVIDER_UNSUPPORTED",
-            )
-        if not settings.gemini_api_key:
-            raise AgentExecutionError("GEMINI_API_KEY nao configurada.", code="LLM_NOT_CONFIGURED")
-
+    def __init__(self, *, settings: Settings, model: BaseChatModel | None = None) -> None:
+        # `model` is injectable for the same reason it is on the Pydantic AI runner: the tests
+        # drive the real graph with a fake chat model, so no credential or network is involved.
         self._settings = settings
-        self._model = ChatGoogleGenerativeAI(
-            model=settings.llm_model,
-            google_api_key=settings.gemini_api_key,
-        )
+        self._model = model if model is not None else _build_model(settings)
 
     async def stream(
         self,
@@ -77,14 +82,17 @@ class LangGraphRunner:
         history: Sequence[HistoryMessage],
         deps: AgentDeps,
     ) -> AsyncIterator[AgentEvent]:
-        answer: list[str] = []
+        state = _StreamState()
 
         try:
-            agent = create_react_agent(self._model, _build_tools(deps))
-            messages = await _build_messages(user_message, history, deps)
+            instructions, messages = await _build_prompt(user_message, history, deps)
+            agent = create_agent(self._model, _build_tools(deps), system_prompt=instructions)
 
-            async for event in agent.astream_events({"messages": messages}, version="v2"):
-                emitted = _translate(event, answer=answer)
+            # The graph declares its input as a TypedDict; mypy will not accept a dict literal
+            # against that overload, and the runtime contract is exactly this shape.
+            graph_input: Any = {"messages": messages}
+            async for event in agent.astream_events(graph_input, version="v2"):
+                emitted = _translate(event, state)
                 if emitted is not None:
                     yield emitted
 
@@ -104,7 +112,7 @@ class LangGraphRunner:
 
         yield AgentEvent(
             kind=AgentEventKind.DONE,
-            text="".join(answer),
+            text="".join(state.answer),
             citations=tuple(deps.citations.values()),
             tool_calls=tuple(deps.invocations),
         )
@@ -140,24 +148,32 @@ def _build_tools(deps: AgentDeps) -> list[StructuredTool]:
     ]
 
 
-async def _build_messages(
+async def _build_prompt(
     user_message: str, history: Sequence[HistoryMessage], deps: AgentDeps
-) -> list[BaseMessage]:
+) -> tuple[str, list[BaseMessage]]:
+    """Instructions plus conversation, from the same builders the other runner uses."""
     catalogue = await deps.sources.list_sources(deps.tutor.id)
     instructions = f"{build_instructions(deps)}\n\n{format_source_catalogue(catalogue)}"
 
-    messages: list[BaseMessage] = [SystemMessage(content=instructions)]
-    for item in history:
-        messages.append(
-            HumanMessage(content=item.content)
-            if item.role is ChatRole.USER
-            else AIMessage(content=item.content)
-        )
+    messages: list[BaseMessage] = [
+        HumanMessage(content=item.content)
+        if item.role is ChatRole.USER
+        else AIMessage(content=item.content)
+        for item in history
+    ]
     messages.append(HumanMessage(content=user_message))
-    return messages
+    return instructions, messages
 
 
-def _translate(event: Mapping[str, Any], answer: list[str]) -> AgentEvent | None:
+@dataclass(slots=True)
+class _StreamState:
+    """Accumulated answer, plus whether the current model turn produced deltas."""
+
+    answer: list[str] = field(default_factory=list)
+    streamed_this_turn: bool = False
+
+
+def _translate(event: Mapping[str, Any], state: _StreamState) -> AgentEvent | None:
     """Map a LangChain stream event to the transport-agnostic one.
 
     Compare with the Pydantic AI runner: there the events are typed objects matched with
@@ -167,13 +183,29 @@ def _translate(event: Mapping[str, Any], answer: list[str]) -> AgentEvent | None
     """
     kind = event.get("event")
 
-    if kind == "on_chat_model_stream":
-        chunk = event.get("data", {}).get("chunk")
-        text = getattr(chunk, "content", "") or ""
-        if isinstance(text, str) and text:
-            answer.append(text)
-            return AgentEvent(kind=AgentEventKind.TOKEN, text=text)
+    if kind == "on_chat_model_start":
+        state.streamed_this_turn = False
         return None
+
+    if kind == "on_chat_model_stream":
+        text = _content_of(event.get("data", {}).get("chunk"))
+        if not text:
+            return None
+        state.streamed_this_turn = True
+        state.answer.append(text)
+        return AgentEvent(kind=AgentEventKind.TOKEN, text=text)
+
+    if kind == "on_chat_model_end":
+        # A model that does not stream emits no chunks at all, only this final event. Reading
+        # the answer solely from deltas would return an empty response for it -- and the failure
+        # would be invisible against a streaming model like Gemini.
+        if state.streamed_this_turn:
+            return None
+        text = _content_of(event.get("data", {}).get("output"))
+        if not text:
+            return None
+        state.answer.append(text)
+        return AgentEvent(kind=AgentEventKind.TOKEN, text=text)
 
     if kind == "on_tool_start":
         return AgentEvent(
@@ -186,6 +218,21 @@ def _translate(event: Mapping[str, Any], answer: list[str]) -> AgentEvent | None
         return AgentEvent(kind=AgentEventKind.TOOL_FINISHED, tool_name=event.get("name"))
 
     return None
+
+
+def _content_of(payload: object) -> str:
+    """Extract text from a message or chunk, ignoring tool-call-only turns."""
+    content = getattr(payload, "content", None)
+    if isinstance(content, str):
+        return content
+    # Multimodal models return a list of blocks; only the text ones matter here.
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""
 
 
 def _source_id_of(payload: object) -> str | None:
