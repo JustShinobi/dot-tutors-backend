@@ -58,7 +58,7 @@ jobs:
         run: mypy app scripts
 
       - name: Tests
-        run: pytest --cov=app --cov-report=term-missing
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=80
 
       - name: Migrations match the models
         # Catches a model edited without a migration -- the failure that only shows up on
@@ -66,3 +66,98 @@ jobs:
         run: |
           alembic upgrade head
           alembic check
+
+  postgres:
+    name: Schema and tests on PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # The README claims the schema is dialect-agnostic. This is what turns that into a fact:
+    # the suite normally runs on SQLite, so without this job nothing would ever exercise the
+    # dialect the deployment actually uses.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tutors
+          POSTGRES_PASSWORD: tutors
+          POSTGRES_DB: tutors
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tutors -d tutors"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      APP_ENV: test
+      DATABASE_URL: "postgresql+asyncpg://tutors:tutors@localhost:5432/tutors"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Migrations apply cleanly on PostgreSQL
+        run: |
+          alembic upgrade head
+          alembic check
+
+      - name: Seed runs against PostgreSQL
+        # Exercises the write path on the real dialect: enums, JSON columns and timestamptz.
+        env:
+          SEED_ADMIN_EMAIL: ci@example.com
+          SEED_ADMIN_PASSWORD: senha-de-ci-nao-usada-em-lugar-nenhum
+        run: python -m scripts.seed
+
+      - name: Migrations roll back
+        # A migration that cannot be undone is a migration you cannot deploy safely.
+        run: alembic downgrade base
+
+  image:
+    name: Container image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # The image is part of the deliverable now, so it is built on every push rather than being
+    # a file nobody ever ran.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: dot-tutors-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The image starts and answers its liveness probe
+        run: |
+          docker run -d --name api -p 8000:8000 \
+            -e APP_ENV=local \
+            -e DATABASE_URL=sqlite+aiosqlite:///./ci.db \
+            dot-tutors-backend:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/healthz > /dev/null; then
+              echo "a API respondeu na tentativa $attempt"
+              curl -fsS http://localhost:8000/readyz
+              docker rm -f api
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "a API nao subiu"
+          docker logs api
+          exit 1
