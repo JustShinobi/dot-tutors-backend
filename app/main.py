@@ -44,9 +44,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the first chat request instead of crashing startup.
     try:
         app.state.agent_runner = build_runner(settings)
+        app.state.agent_runner_error = None
         runner_ready = True
     except AppError as exc:
         app.state.agent_runner = None
+        # Kept so the chat dependency can log *why* it is refusing, instead of only that it is.
+        app.state.agent_runner_error = f"{exc.code}: {exc.message}"
         runner_ready = False
         logger.warning("agent_runner_unavailable", error_code=exc.code, reason=exc.message)
 

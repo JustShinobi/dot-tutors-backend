@@ -453,6 +453,77 @@ async def test_an_agent_failure_is_reported_as_an_sse_error_event(
     assert "modelo indisponivel" not in response.text
 
 
+class _ExplodingRunner:
+    """A runner that fails *outside* the agent framework's own error handling.
+
+    The runners swallow their own failures and emit an ERROR event, so they never exercise the
+    transport's last-resort handler. This does — which is where the handler used to die on a
+    lazy-load after `session.rollback()`, killing the stream instead of closing it.
+    """
+
+    name = "exploding"
+
+    async def stream(self, *, user_message: str, history: Any, deps: Any) -> AsyncIterator[Any]:
+        msg = "falha fora do runner"
+        raise RuntimeError(msg)
+        yield  # pragma: no cover
+
+
+async def test_a_failure_outside_the_runner_still_closes_the_stream_with_an_error_event(
+    client: AsyncClient, auth_headers: Headers, app: Any
+) -> None:
+    _, public_key = await _seed_embed(client, auth_headers)
+    session = await _open_session(client, public_key)
+    app.state.agent_runner = _ExplodingRunner()
+
+    response = await client.post(
+        "/api/v1/embed/chat", json={"message": "oi"}, headers=_bearer(session)
+    )
+
+    assert response.status_code == 200
+    name, data = _parse_sse(response.text)[-1]
+    assert name == "error"
+    assert data["code"] == "AGENT_FAILED"
+    assert "falha fora do runner" not in response.text
+
+
+async def test_the_same_failure_without_streaming_is_a_clean_error_body(
+    client: AsyncClient, auth_headers: Headers, app: Any
+) -> None:
+    _, public_key = await _seed_embed(client, auth_headers)
+    session = await _open_session(client, public_key)
+    app.state.agent_runner = _ExplodingRunner()
+
+    response = await client.post(
+        "/api/v1/embed/chat",
+        json={"message": "oi", "stream": False},
+        headers=_bearer(session),
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "AGENT_FAILED"
+    assert "Traceback" not in response.text
+    assert "falha fora do runner" not in response.text
+
+
+async def test_an_unconfigured_model_is_refused_before_the_stream_opens(
+    client: AsyncClient, auth_headers: Headers, app: Any
+) -> None:
+    """Booting without GEMINI_API_KEY leaves the runner unbuilt (see the lifespan)."""
+    _, public_key = await _seed_embed(client, auth_headers)
+    session = await _open_session(client, public_key)
+    app.state.agent_runner = None
+
+    response = await client.post(
+        "/api/v1/embed/chat", json={"message": "oi"}, headers=_bearer(session)
+    )
+
+    # A real status code, not a stream that opens and then dies.
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "AGENT_UNAVAILABLE"
+    assert response.headers["content-type"].startswith("application/json")
+
+
 # --- rate limiting ---------------------------------------------------------
 
 

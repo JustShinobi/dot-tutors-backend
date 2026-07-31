@@ -138,3 +138,16 @@ class AgentExecutionError(AppError):
     code = "AGENT_FAILED"
     status_code = 502
     message = "Nao foi possivel gerar a resposta do tutor."
+
+
+class AgentUnavailableError(AppError):
+    """The agent could not be built at startup — usually a missing model credential.
+
+    Raised by the dependency, *before* the route body runs, so the client gets a normal error
+    response instead of a stream that opens and then dies. The operator-facing reason stays in
+    the logs; the client only learns that the tutor cannot answer right now.
+    """
+
+    code = "AGENT_UNAVAILABLE"
+    status_code = 503
+    message = "O tutor esta temporariamente indisponivel para responder."

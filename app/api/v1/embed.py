@@ -184,15 +184,31 @@ async def _event_stream(
     service: Any,
     session: Any,
 ) -> AsyncIterator[str]:
+    # Read before the try: `session.rollback()` in the handler below expires every ORM
+    # instance, and touching `chat_session.id` afterwards would trigger a lazy refresh from a
+    # sync context — raising `MissingGreenlet` *inside the error handler*, which killed the
+    # stream instead of closing it with the error event this whole block exists to send.
+    session_id = chat_session.id
+    failed = False
+
     try:
         async for event in service.answer(chat_session, payload.message):
+            if event.kind is AgentEventKind.ERROR:
+                failed = True
             yield _sse(event)
-        await session.commit()
+
+        if failed:
+            # A turn that produced no answer is rolled back whole, user message included. Keeping
+            # the question without its answer would make a retry duplicate it in the transcript,
+            # and the agent would then see the same question twice in its history.
+            await session.rollback()
+        else:
+            await session.commit()
     except Exception:
         # The response has already started, so there is no status code left to change: the
         # only honest thing is to emit an error event and close cleanly.
+        logger.exception("chat_stream_failed", session_id=session_id)
         await session.rollback()
-        logger.exception("chat_stream_failed", session_id=chat_session.id)
         yield _sse(
             AgentEvent(
                 kind=AgentEventKind.ERROR,
@@ -205,10 +221,19 @@ async def _event_stream(
 async def _answer_json(
     payload: ChatRequest, chat_session: Any, service: Any, session: Any
 ) -> Response:
+    session_id = chat_session.id
     final: AgentEvent | None = None
-    async for event in service.answer(chat_session, payload.message):
-        if event.kind in (AgentEventKind.DONE, AgentEventKind.ERROR):
-            final = event
+
+    try:
+        async for event in service.answer(chat_session, payload.message):
+            if event.kind in (AgentEventKind.DONE, AgentEventKind.ERROR):
+                final = event
+    except Exception as exc:
+        # Same failure as the streaming path, but here a status code is still available, so it
+        # becomes a normal error body instead of a generic 500.
+        logger.exception("chat_request_failed", session_id=session_id)
+        await session.rollback()
+        raise AgentExecutionError from exc
 
     if final is None or final.kind is AgentEventKind.ERROR:
         await session.rollback()
