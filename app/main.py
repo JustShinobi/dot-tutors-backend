@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.error_handlers import register_error_handlers
 from app.api.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
-from app.api.v1 import auth, health, tutors
+from app.api.v1 import auth, embed_keys, health, tutors
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import create_engine, create_session_factory
@@ -77,6 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(tutors.router)
+    app.include_router(embed_keys.router)
 
     return app
 

@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.errors import AuthenticationError
 from app.db.models.admin import AdminUser
+from app.repositories.embed import EmbedKeyRepository
 from app.repositories.tutor import SourceRepository, TutorRepository
 from app.services.auth_service import AuthService
+from app.services.embed_service import EmbedService
 from app.services.tutor_service import TutorService
 
 # `auto_error=False` so a missing header raises our own AuthenticationError, keeping the error
@@ -59,6 +61,19 @@ def get_tutor_service(session: SessionDep, settings: SettingsDep) -> TutorServic
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 TutorServiceDep = Annotated[TutorService, Depends(get_tutor_service)]
+
+
+def get_embed_service(
+    session: SessionDep, settings: SettingsDep, tutors: TutorServiceDep
+) -> EmbedService:
+    return EmbedService(
+        keys=EmbedKeyRepository(session),
+        tutors=tutors,
+        settings=settings,
+    )
+
+
+EmbedServiceDep = Annotated[EmbedService, Depends(get_embed_service)]
 
 
 async def require_admin(

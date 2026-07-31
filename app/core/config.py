@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     # --- cors / embed ------------------------------------------------------
     admin_origin: str = "http://localhost:3000"
     embed_default_origins: str = "http://localhost:3000"
+    frontend_base_url: str = "http://localhost:3000"
+    """Public URL of the frontend, used to build the `<iframe>` snippet handed to integrators."""
 
     # --- rate limit --------------------------------------------------------
     rate_limit_chat_per_minute: int = 20
