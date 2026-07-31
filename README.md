@@ -261,7 +261,8 @@ alucinado e degrada quando uma fonte cai.
 o LangGraph para fluxos com estado (nenhum hoje).
 
 **Como a decisão foi protegida.** O agente fica atrás do protocolo `AgentRunner`. **Nenhum módulo
-fora de `app/agent/` importa `pydantic_ai`.** E há um segundo runner, em LangGraph, atrás da mesma
+de `app/` fora de `app/agent/` importa `pydantic_ai`** — os testes importam, porque é de lá que vem
+o `FunctionModel`. E há um segundo runner, em LangGraph, atrás da mesma
 interface — instalável com `pip install -e ".[langgraph]"` e ativável com `AGENT_RUNNER=langgraph`.
 O que a comparação mostrou:
 

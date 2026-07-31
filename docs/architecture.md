@@ -55,7 +55,7 @@ Material de apoio exigido pelo PRD §8.1.
 │  │ messages      │             ▼                                            │
 │  └───────────────┘   ┌──────────────────────┐                              │
 │                      │ Fontes HTTP públicas │                              │
-│                      │ (.md / .txt / .json) │                              │
+│                      │ md · txt · html·json │                              │
 │                      └──────────────────────┘                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -91,5 +91,6 @@ Integrador   Widget(iframe)      Backend                Agente          Fonte/LL
 | Agente | `app/agent/` | Orquestração do LLM e ferramentas de conhecimento. Isolado atrás de `AgentRunner`. |
 | Infra | `app/core/` + `app/utils/` | Config, logging, erros, segurança, cliente HTTP. |
 
-Nenhum módulo fora de `app/agent/` importa `pydantic_ai` — é o que torna a decisão D1 reversível
-e permite o runner alternativo em LangGraph.
+Nenhum módulo de `app/` fora de `app/agent/` importa `pydantic_ai` — é o que torna a decisão D1
+reversível e permite o runner alternativo em LangGraph. (Os testes importam, porque é de lá que
+vem o `FunctionModel` que substitui o LLM.)

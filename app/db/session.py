@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -14,6 +14,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def create_engine(settings: Settings) -> AsyncEngine:
@@ -69,6 +72,21 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
 
 async def dispose_engine(engine: AsyncEngine) -> None:
     await engine.dispose()
+
+
+async def is_reachable(session: AsyncSession) -> bool:
+    """Whether the database answers a trivial query.
+
+    Lives here, in the infrastructure layer, rather than inline in the readiness route: the
+    documented rule is that routes do not touch the ORM, and a health check is not an exception
+    worth carving out of it.
+    """
+    try:
+        await session.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("database_unreachable")
+        return False
+    return True
 
 
 async def session_scope(

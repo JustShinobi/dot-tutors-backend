@@ -22,6 +22,7 @@ The fence has five parts:
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -168,7 +169,13 @@ async def fetch_text(
     Passing `etag`/`last_modified` turns the call into a conditional request: an unchanged
     document answers `304` and costs almost nothing, which is what keeps the cache cheap.
     """
-    addresses = assert_public_url(url, allow_private_network=allow_private_network)
+    # `getaddrinfo` is a blocking call, and blocking the event loop inside a request handler is
+    # exactly what an async application must not do: one slow DNS answer would stall every other
+    # conversation in the process. The check stays synchronous for callers that want it that way
+    # (the tests), and only the awaiting is delegated.
+    addresses = await asyncio.to_thread(
+        assert_public_url, url, allow_private_network=allow_private_network
+    )
 
     headers = {"Accept": "text/plain, text/markdown, text/html, application/json;q=0.9"}
     if etag:
@@ -193,7 +200,9 @@ async def fetch_text(
             current_url = str(httpx.URL(current_url).join(location))
             # Re-validate: the first URL being public says nothing about where it points. The
             # new addresses replace the old ones, so the next hop is pinned to its own target.
-            addresses = assert_public_url(current_url, allow_private_network=allow_private_network)
+            addresses = await asyncio.to_thread(
+                assert_public_url, current_url, allow_private_network=allow_private_network
+            )
             await response.aclose()
             if hop == _MAX_REDIRECTS:
                 raise SourceFetchError("Excesso de redirecionamentos.")

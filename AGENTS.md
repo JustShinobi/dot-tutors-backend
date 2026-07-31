@@ -39,11 +39,15 @@ Stack: Python 3.12 · FastAPI · SQLAlchemy 2.0 async · Alembic · **Pydantic A
 
 - **Camadas:** `api` (HTTP) → `services` (regra de negócio) → `repositories` (dados) → `db.models`.
   Rotas não acessam o ORM diretamente; serviços não conhecem objetos de request/response HTTP.
-- **O agente fica isolado** em `app/agent/`, atrás do protocolo `AgentRunner`. Nada fora dessa pasta
-  importa `pydantic_ai` — é o que mantém a decisão D1 reversível.
+- **O agente fica isolado** em `app/agent/`, atrás do protocolo `AgentRunner`. Nenhum outro módulo
+  de `app/` importa `pydantic_ai` — é o que mantém a decisão D1 reversível. Os testes importam, de
+  propósito: é de lá que vem o `FunctionModel`.
 - **Tipagem obrigatória:** `mypy --strict` precisa passar. Sem `Any` gratuito, sem `# type: ignore`
   sem comentário explicando.
-- **Async em todo I/O.** Nada de `requests`, `time.sleep` ou driver síncrono de banco.
+- **Async em todo I/O.** Nada de `requests`, `time.sleep` ou driver síncrono de banco. Chamada de
+  biblioteca que bloqueia e não tem versão async (`socket.getaddrinfo`, por exemplo) vai para
+  `asyncio.to_thread` — bloquear o event loop atrasa todas as conversas do processo, não só a que
+  está esperando.
 - **Idioma:** código, identificadores e docstrings em inglês; documentação (`README`, `docs/`) e
   mensagens voltadas ao usuário final em português.
 - **Commits:** Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `refactor:`,
@@ -55,8 +59,9 @@ Stack: Python 3.12 · FastAPI · SQLAlchemy 2.0 async · Alembic · **Pydantic A
 
 ```bash
 ruff check . && ruff format --check .
-mypy app
+mypy app scripts
 pytest
+python scripts/check_no_vector_deps.py
 ```
 
 Os três precisam passar. Se algum falhar, a tarefa não está pronta.

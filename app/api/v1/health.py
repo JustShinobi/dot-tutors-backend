@@ -10,12 +10,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy import text
 
 from app.api.deps import SessionDep
-from app.core.logging import get_logger
-
-logger = get_logger(__name__)
+from app.db.session import is_reachable
 
 router = APIRouter(tags=["health"])
 
@@ -54,12 +51,7 @@ async def healthz() -> HealthResponse:
     responses={503: {"description": "Alguma dependencia essencial esta indisponivel"}},
 )
 async def readyz(session: SessionDep, request: Request, response: Response) -> ReadinessResponse:
-    try:
-        await session.execute(text("SELECT 1"))
-        database = "ok"
-    except Exception:
-        logger.exception("readiness_database_unavailable")
-        database = "unavailable"
+    database = "ok" if await is_reachable(session) else "unavailable"
 
     # An unconfigured agent degrades the product (no chat) but leaves the admin API working, so
     # it is *reported* without failing the probe — an instance serving only the panel is still
