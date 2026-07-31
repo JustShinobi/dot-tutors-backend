@@ -1,0 +1,29 @@
+# PostgreSQL opcional.
+#
+# O projeto roda com SQLite por padrao (zero dependencia externa). Suba este servico apenas
+# se quiser paridade com producao; depois aponte DATABASE_URL para ele:
+#
+#   docker compose up -d db
+#   DATABASE_URL=postgresql+asyncpg://tutors:tutors@localhost:5432/tutors
+#   alembic upgrade head
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dot-tutors-db
+    environment:
+      POSTGRES_USER: tutors
+      POSTGRES_PASSWORD: tutors
+      POSTGRES_DB: tutors
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tutors -d tutors"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
