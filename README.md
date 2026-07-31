@@ -106,9 +106,9 @@ uvicorn app.main:app --reload
 API em <http://localhost:8000>, documentação interativa em `/docs`.
 
 O seed cria o administrador, dois tutores de demonstração — um com fontes HTTP públicas e estáveis
-(PEP 20 e PEP 8) e outro com uma política interna fictícia em texto — **e uma chave de embed**,
-imprimindo o link pronto de demonstração. É o caminho mais curto entre `git clone` e um widget
-respondendo dentro de um iframe.
+(PEP 20 e PEP 8) e outro com uma política interna fictícia em texto — e uma chave de embed,
+imprimindo o link pronto de demonstração. Depois do `git clone`, não é preciso passar pelo painel
+para ver o widget respondendo dentro de um iframe.
 
 Com `uv` (opcional): `uv sync && uv run uvicorn app.main:app --reload`.
 
@@ -124,12 +124,12 @@ alembic upgrade head
 
 ### Retenção
 
-`python -m scripts.cleanup` apaga sessões expiradas e suas mensagens. Pensado para uma entrada
-de cron; não há agendador no processo de propósito, porque uma thread de fundo dentro da API
-rodaria uma vez por réplica.
+`python -m scripts.cleanup` apaga sessões expiradas e suas mensagens. É feito para uma entrada de
+cron: não há agendador dentro do processo porque uma thread de fundo na API rodaria uma vez por
+réplica.
 
-(Os buckets de rate limit são a exceção: vivem *dentro* de um processo, então são limpos por uma
-tarefa de fundo — por processo é exatamente o escopo certo para eles.)
+Os buckets de rate limit são a exceção. Como vivem na memória de um processo, quem os limpa é uma
+tarefa de fundo daquele mesmo processo.
 
 ---
 
@@ -229,63 +229,59 @@ Integrador   Widget(iframe)      Backend                Agente          Fonte/LL
 | # | Decisão | Escolha | Por quê |
 |---|---|---|---|
 | D1 | Framework de agente (§4.3.1) | **Pydantic AI** | Ver seção dedicada abaixo |
-| D2 | Transporte do chat (§3.3) | **HTTP + SSE** | A conversa é requisição/resposta com saída em stream. Bidirecionalidade não compraria nada e custaria estado de conexão, um segundo caminho de autenticação e testes mais difíceis. SSE transmite token a token, atravessa proxies e reconecta trivialmente. Endpoint irmão com `stream=false` para testes e chamadas server-to-server. |
-| D3 | Banco de dados (§4.4.1) | **SQLite** por padrão, **PostgreSQL** por env | SQLite deixa o projeto subir com um comando — o que importa para quem vai avaliar. O schema é agnóstico de dialeto de propósito: sem `JSONB`, sem enum nativo, timestamps normalizados em UTC por um `TypeDecorator`, e foreign keys explicitamente habilitadas no SQLite (que as ignora por padrão). Os testes rodam em SQLite justamente para essa paridade não ser só uma afirmação. |
+| D2 | Transporte do chat (§3.3) | **HTTP + SSE** | A conversa é requisição/resposta com saída em stream, e o servidor nunca envia nada fora do turno. WebSocket cobriria isso, mas traria estado de conexão, um segundo caminho de autenticação e testes mais difíceis. SSE transmite token a token, atravessa proxies e reconecta sem esforço. Há um endpoint irmão com `stream=false` para testes e chamadas server-to-server. |
+| D3 | Banco de dados (§4.4.1) | **SQLite** por padrão, **PostgreSQL** por env | Com SQLite o projeto sobe com um comando, sem dependência externa. O schema evita construções específicas de dialeto: sem `JSONB`, sem enum nativo, timestamps normalizados em UTC por um `TypeDecorator` e foreign keys habilitadas explicitamente no SQLite, que as ignora por padrão. A suíte roda nos dois bancos no CI. |
 | D4 | Auth do admin (§4.1.2) | **JWT HS256** | Permite expiração e claims de papel sem tabela de sessão. |
 | D5 | Auth do embed (§3.4) | **Chave pública + allowlist de origem + token de sessão curto** | Ver [Segurança do modelo de embed](#segurança-do-modelo-de-embed) |
 | D6 | Estratégia de conhecimento (§4.3.2) | **Tools agênticas + BM25 lexical** | Ver seção dedicada |
 | D7 | LLM | **Google Gemini** (`gemini-3.6-flash`) | Provider e modelo por env. |
-| D8 | Rate limit (§5.1) | Token bucket em memória | Simples e suficiente para demo; a limitação está declarada, não escondida. |
+| D8 | Rate limit (§5.1) | Token bucket em memória | Suficiente para uma instância; as consequências estão em [Limitações conhecidas](#limitações-conhecidas-do-mvp). |
 | D9 | CORS (§5.1) | Política dupla em middleware próprio | Ver seção de segurança |
 
 ### D1 — Por que Pydantic AI, e não LangChain
 
-A pergunta não é qual framework é mais completo, e sim **qual é o menor conjunto de abstrações
-que resolve este problema sem impedir o próximo**.
+O grosso do valor do LangChain está nas integrações de RAG: loaders, retrievers, vector stores. O
+§6.2 do PRD veta essa categoria inteira, então esse peso todo sai da conta. O que sobraria de útil
+é o LangGraph, que compensa em grafos com vários nós, ramificação e checkpointing. Este projeto
+tem um agente e um loop de ferramentas.
 
-**1. O PRD remove justamente o diferencial do LangChain.** O valor dele se concentra em
-integrações de RAG — loaders, retrievers, vector stores — e o §6.2 veta exatamente isso. Sobra o
-LangGraph, cujo ganho aparece em grafos com múltiplos nós, ramificação e checkpointing. Aqui há
-**um agente e um loop de ferramentas**.
+O que pesou mais na escolha foi teste. O §5.3 exige testes nos pontos críticos e o ponto crítico
+aqui é o agente. Com `FunctionModel` dá para rodar o loop real, as ferramentas reais e a
+recuperação BM25 real com o modelo roteirizado — sem chave de API, sem rede e sem flakiness. São
+18 testes verificando que o agente busca na fonte certa, se recupera de um `source_id` alucinado e
+degrada quando uma fonte cai.
 
-**2. Testabilidade decidiu.** O §5.3 exige testes nos pontos críticos, e o ponto crítico é o
-agente. `FunctionModel` permite rodar o **loop real, as ferramentas reais e a recuperação BM25
-real** com o modelo roteirizado — sem chave de API, sem rede, sem custo de token e sem
-instabilidade. São 18 testes que provam que o agente busca na fonte certa, se recupera de um id
-alucinado e degrada quando uma fonte cai.
+O terceiro motivo é encaixe com a stack: `RunContext[AgentDeps]` cumpre dentro do agente o papel
+que o `Depends` cumpre no FastAPI, e `mypy --strict` passa de ponta a ponta.
 
-**3. Tipagem e injeção de dependências combinam com a stack.** `RunContext[AgentDeps]` é o
-`Depends` do FastAPI dentro do agente. `mypy --strict` passa de ponta a ponta.
+Fica de fora o catálogo de integrações, irrelevante aqui porque as fontes são HTTP simples, e o
+LangGraph para fluxos com estado, que hoje não existem.
 
-**O que se perde:** o catálogo de integrações (irrelevante aqui — as fontes são HTTP simples) e
-o LangGraph para fluxos com estado (nenhum hoje).
+Para a escolha não virar um caminho sem volta, o agente fica atrás do protocolo `AgentRunner`, e
+nenhum módulo de `app/` fora de `app/agent/` importa `pydantic_ai` (os testes importam, porque o
+`FunctionModel` vem de lá). Existe um segundo runner em LangGraph atrás da mesma interface,
+instalável com `pip install -e ".[langgraph]"` e ativável com `AGENT_RUNNER=langgraph`. Escrever os
+dois expôs onde as diferenças aparecem:
 
-**Como a decisão foi protegida.** O agente fica atrás do protocolo `AgentRunner`. **Nenhum módulo
-de `app/` fora de `app/agent/` importa `pydantic_ai`** — os testes importam, porque é de lá que vem
-o `FunctionModel`. E há um segundo runner, em LangGraph, atrás da mesma
-interface — instalável com `pip install -e ".[langgraph]"` e ativável com `AGENT_RUNNER=langgraph`.
-O que a comparação mostrou:
+- A camada de conhecimento não mudou. `SourceService` e `app/agent/tools.py` ficaram intactos, só a
+  fiação mudou — as ferramentas são lógica de domínio, não artefato de framework.
+- O streaming é o que custa. `run_stream_events` entrega deltas de texto e eventos de ferramenta
+  num único iterador tipado; o equivalente exige `astream_events`, filtro por nome de evento e
+  mapeamento manual de formatos de chunk, tipado por string e falhando só em runtime.
+- Roteirizar chamadas de ferramenta custa poucas linhas com `FunctionModel`; no LangGraph exige um
+  chat model falso implementando a interface do LangChain.
 
-- **A camada de conhecimento não se moveu.** `SourceService` e `app/agent/tools.py` ficaram
-  intactos; só a fiação mudou. É a prova de que as ferramentas foram construídas como lógica de
-  domínio, não como artefato de framework.
-- **O streaming é onde está o custo.** `run_stream_events` entrega deltas de texto e eventos de
-  ferramenta num único iterador tipado. O equivalente exige `astream_events`, filtro por nome de
-  evento e mapeamento manual de formatos de chunk — tipado por string, com falha só em runtime.
-- **O teste é a diferença real.** Roteirizar chamadas de ferramenta custa poucas linhas com
-  `FunctionModel`; o equivalente exige um chat model falso implementando a interface do LangChain.
-
-Nada disso faz do LangGraph uma ferramenta ruim — ele é forte para grafos com estado. É apenas
-mais maquinaria do que um único loop de tool-calling precisa.
+Nada disso desqualifica o LangGraph, que é bom no que se propõe. É mais maquinaria do que um único
+loop de tool-calling precisa.
 
 ---
 
 ## Estratégia de conhecimento agêntica
 
-**Não há banco vetorial, índice vetorial nem modelo de embedding neste projeto.** Isso não é uma
-afirmação de README: `scripts/check_no_vector_deps.py` falha o build se uma dependência banida
-entrar no `pyproject.toml` ou se um símbolo de embedding for importado por `app/` — inclusive a
-API de embeddings que o próprio `pydantic-ai` oferece. O script roda no pre-commit e no CI.
+Não há banco vetorial, índice vetorial nem modelo de embedding neste projeto, e isso é verificado
+por código: `scripts/check_no_vector_deps.py` falha o build se uma dependência banida entrar no
+`pyproject.toml` ou se um símbolo de embedding for importado por `app/`, inclusive a API de
+embeddings que o próprio `pydantic-ai` oferece. O script roda no pre-commit e no CI.
 
 O agente decide o que consultar, uma chamada por vez:
 
@@ -299,11 +295,10 @@ O agente decide o que consultar, uma chamada por vez:
 O catálogo de fontes é injetado nas instruções, poupando uma chamada de `list_sources` a cada
 mensagem.
 
-**Sobre o BM25.** A relevância é decidida por **sobreposição de tokens**; o BM25 apenas ordena os
-candidatos. O motivo é concreto: o IDF do BM25 fica negativo quando o termo aparece na maior
-parte do corpus, e num documento curto — um FAQ, uma política enxuta — esse é o caso normal. Um
-filtro por `score > 0` tornava documentos pequenos silenciosamente impesquisáveis. Está fixado por
-teste de regressão.
+**Sobre o BM25.** Quem decide se um trecho é candidato é a sobreposição de tokens; o BM25 só
+ordena. O IDF do BM25 fica negativo quando o termo aparece na maior parte do corpus, e num
+documento curto — um FAQ, uma política enxuta — isso é o caso comum. Filtrar por `score > 0`
+tornava documentos pequenos silenciosamente impesquisáveis. Há teste de regressão para isso.
 
 **Limites.** Teto de chamadas de ferramenta (`UsageLimits.tool_calls_limit`), timeout total da
 execução, truncamento por ferramenta e por documento. Uma fonte fora do ar devolve erro
@@ -313,33 +308,33 @@ estruturado ao agente em vez de derrubar a conversa — ele avisa e responde com
 
 ## Segurança do modelo de embed
 
-A chave `pk_live_...` viaja no `src` do iframe e **é pública por natureza**. Tratá-la como
-segredo seria autoengano. O que protege o tutor:
+A chave `pk_live_...` viaja no `src` do iframe, ou seja, é pública por natureza — qualquer visitante
+do site integrador consegue lê-la no HTML. O que protege o tutor:
 
 1. **Allowlist de origens por chave**, conferida contra o header `Origin` a cada abertura de
    sessão. A comparação é exata — sem `startswith`, sem `endswith`, sem substring, que são as
    formas clássicas de furar uma allowlist. Testes cobrem sufixo enganoso
    (`cliente.com.attacker.net`), subdomínio não listado, esquema e porta diferentes, `Origin: null`
    de iframe sandbox e `Origin` ausente.
-2. **`frame-ancestors` por tutor**, emitido pelo frontend. Complementa, não duplica: esse header
-   impede a página de **renderizar** em site hostil (garantia do navegador); a checagem de
-   `Origin` impede a sessão de **abrir** (garantia do servidor).
+2. **`frame-ancestors` por tutor**, emitido pelo frontend. As duas camadas agem em momentos
+   diferentes: esse header impede a página de renderizar em site hostil, e quem garante isso é o
+   navegador; a checagem de `Origin` impede a sessão de abrir, e quem garante isso é o servidor.
 3. **Token de sessão curto e escopado**, com claim `aud` separando-o do token de admin — um token
    do widget não pode ser reaproveitado na API administrativa, e há teste para isso.
 4. **Rate limit** por sessão e por IP.
 5. **O segredo real — a chave do LLM — nunca sai do backend.**
 
-**Sobre CORS.** A API de embed **ecoa qualquer origem**, e isso é deliberado. CORS é uma proteção
-de *leitura* do navegador, não um mecanismo de autorização: uma resposta bloqueada já chegou ao
-servidor e já executou. Recusar origens desconhecidas nessa camada não protegeria nada e quebraria
-todo integrador legítimo. A autorização fica onde deve estar — no `Origin` conferido contra a
-allowlist, que responde `403` antes de qualquer trabalho. Credenciais ficam desligadas, porque o
-token viaja no header `Authorization` e nunca em cookie.
+**Sobre CORS.** A API de embed ecoa qualquer origem, deliberadamente. CORS restringe a *leitura* da
+resposta pelo navegador; não é mecanismo de autorização, já que uma resposta bloqueada foi recebida
+e executada pelo servidor do mesmo jeito. Recusar origens desconhecidas nessa camada quebraria todo
+integrador legítimo sem impedir nenhum abuso. A autorização acontece um passo antes: o `Origin` é
+conferido contra a allowlist e a requisição recebe `403` antes de qualquer trabalho. Credenciais
+ficam desligadas, porque o token viaja no header `Authorization` e nunca em cookie.
 
-**Revogação tem efeito imediato.** Um token de sessão vale por todo o seu TTL, então revogar uma
-chave só significaria alguma coisa se a sessão fosse reconferida. Ela é: cada mensagem revalida a
-chave e a origem gravada contra a allowlist atual. Tirar um domínio da lista derruba as conversas
-em andamento daquele domínio, sem esperar 30 minutos.
+**Revogação com efeito imediato.** Um token de sessão vale por todo o seu TTL, então revogar uma
+chave só teria efeito se a sessão fosse reconferida — e é. Cada mensagem revalida a chave e a
+origem gravada contra a allowlist atual, então tirar um domínio da lista derruba as conversas em
+andamento daquele domínio sem esperar os 30 minutos.
 
 **Força bruta no login.** `POST /auth/login` é o único endpoint que verifica senha e tem limite
 por IP. A checagem vem **antes** da verificação — bcrypt é lento de propósito, o que torna
@@ -376,20 +371,18 @@ Tudo isso roda no CI a cada push e pull request, em três jobs:
 
 1. **Lint, tipos e testes** em SQLite, com piso de cobertura e `alembic check` para pegar um
    modelo alterado sem migração.
-2. **PostgreSQL**: as migrations sobem e descem, e o seed roda contra o dialeto real. Sem este
-   job, "o schema é agnóstico de dialeto" seria uma afirmação de README que nada verifica.
-3. **Imagem de contêiner**: a imagem é construída e precisa responder `/healthz` — o arquivo que
-   vai a produção não pode ser o único que ninguém executa.
+2. **PostgreSQL**: as migrations sobem e descem, e o seed roda contra o dialeto real. É o que
+   sustenta a decisão D3 de manter o schema independente de dialeto.
+3. **Imagem de contêiner**: a imagem é construída e precisa responder `/healthz`, para o
+   `Dockerfile` não ser o único arquivo do repositório que nenhum job executa.
 
-Os testes rodam contra um **SQLite real em memória** — constraints, unicidade e cascade são
-exercitados de verdade, sem mock de ORM e sem servidor externo. Os testes do agente exercitam o
-loop real com o modelo substituído.
+Os testes rodam contra um SQLite real em memória, sem mock de ORM e sem servidor externo, então
+constraints, unicidade e cascade são exercitados de verdade. Os testes do agente rodam o loop real
+com o modelo substituído.
 
 ---
 
 ## Limitações conhecidas do MVP
-
-Declaradas, não escondidas:
 
 - **Rate limit em memória.** Não sobrevive a restart nem é compartilhado entre réplicas: um
   deploy horizontal multiplicaria o limite pelo número de instâncias. Os buckets ociosos são
