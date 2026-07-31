@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The suite never calls a real model, so no credential is needed. `APP_ENV=test` also keeps
+  # the placeholder-rejection guard in `Settings` from firing.
+  APP_ENV: test
+  DATABASE_URL: "sqlite+aiosqlite:///./ci.db"
+
+jobs:
+  quality:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Knowledge strategy guard (PRD 6.2 / 7.4)
+        # Runs first and on its own: if a vector database ever creeps in, that is the finding,
+        # and it should not be buried under a lint report.
+        run: python scripts/check_no_vector_deps.py
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format
+        run: ruff format --check .
+
+      - name: Types
+        run: mypy app scripts
+
+      - name: Tests
+        run: pytest --cov=app --cov-report=term-missing
+
+      - name: Migrations match the models
+        # Catches a model edited without a migration -- the failure that only shows up on
+        # someone else's machine.
+        run: |
+          alembic upgrade head
+          alembic check
