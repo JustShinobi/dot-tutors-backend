@@ -8,7 +8,7 @@ the same interface for comparison.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -76,6 +76,44 @@ class AgentEvent:
     error_code: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ModelOverrides:
+    """Per-tutor model configuration, resolved from `tutor.model_settings`.
+
+    Expressed here rather than as framework types so both runners consume the same thing, and
+    so the administrative API is not silently accepting settings nothing reads.
+    """
+
+    model: str | None = None
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> ModelOverrides:
+        """Read what the administrator configured, ignoring anything malformed.
+
+        A bad value in this column must degrade to the global default, never break the
+        conversation: the column is JSON and could hold a row written by an older schema.
+        """
+        return cls(
+            model=_as_str(raw.get("model")),
+            temperature=_as_float(raw.get("temperature")),
+            max_output_tokens=_as_int(raw.get("max_output_tokens")),
+        )
+
+
+def _as_str(value: object) -> str | None:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def _as_float(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _as_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 @dataclass(slots=True)
 class AgentDeps:
     """Everything a tool needs at run time, injected per request."""
@@ -84,8 +122,23 @@ class AgentDeps:
     sources: SourceService
     session_id: str
     max_tool_calls: int
+    overrides: ModelOverrides = field(default_factory=ModelOverrides)
     invocations: list[ToolInvocation] = field(default_factory=list)
     citations: dict[str, Citation] = field(default_factory=dict)
+
+    def label_for(self, source_id: str | None) -> str | None:
+        """Human-readable name of a source the model just asked for.
+
+        The model calls tools with source *ids*; the widget shows "consulting <name>". Resolving
+        it here — from the tutor already loaded in memory — avoids both a query and the earlier
+        behaviour of sending a raw UUID under a field called `source_label`.
+        """
+        if not source_id:
+            return None
+        for source in self.tutor.sources:
+            if source.id == source_id:
+                return source.label
+        return None
 
 
 @runtime_checkable

@@ -26,6 +26,7 @@ It is simply more machinery than a single tool-calling loop needs.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,10 +44,12 @@ from app.agent.contracts import (
     AgentEventKind,
     ChatRole,
     HistoryMessage,
+    ModelOverrides,
 )
 from app.agent.prompts import build_instructions, format_source_catalogue
+from app.agent.retry import backoff_delay, is_retryable
 from app.core.config import Settings
-from app.core.errors import AgentExecutionError
+from app.core.errors import AgentExecutionError, AgentTimeoutError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -83,18 +86,79 @@ class LangGraphRunner:
         deps: AgentDeps,
     ) -> AsyncIterator[AgentEvent]:
         state = _StreamState()
+        emitted_anything = False
 
         try:
-            instructions, messages = await _build_prompt(user_message, history, deps)
-            agent = create_agent(self._model, _build_tools(deps), system_prompt=instructions)
+            # The same guardrails as the primary runner. Without them, switching
+            # `AGENT_RUNNER=langgraph` would quietly drop the cost, latency and retry
+            # behaviour — a comparison is only honest if both sides run under the same limits.
+            async with asyncio.timeout(self._settings.agent_timeout_seconds):
+                for attempt in range(1, self._settings.agent_max_attempts + 1):
+                    try:
+                        instructions, messages = await _build_prompt(user_message, history, deps)
+                        agent = create_agent(
+                            _apply_overrides(self._model, deps.overrides),
+                            _build_tools(deps),
+                            system_prompt=instructions,
+                        )
 
-            # The graph declares its input as a TypedDict; mypy will not accept a dict literal
-            # against that overload, and the runtime contract is exactly this shape.
-            graph_input: Any = {"messages": messages}
-            async for event in agent.astream_events(graph_input, version="v2"):
-                emitted = _translate(event, state)
-                if emitted is not None:
-                    yield emitted
+                        # The graph declares its input as a TypedDict; mypy will not accept a
+                        # dict literal against that overload, and the runtime contract is
+                        # exactly this shape.
+                        graph_input: Any = {"messages": messages}
+                        # A ReAct step is one model call plus one tool batch, so the recursion
+                        # limit is the closest equivalent to `tool_calls_limit`; the +2 covers
+                        # the first model turn and the final answer.
+                        config: Any = {"recursion_limit": deps.max_tool_calls * 2 + 2}
+
+                        async for event in agent.astream_events(
+                            graph_input, version="v2", config=config
+                        ):
+                            emitted = _translate(event, state, deps)
+                            if emitted is not None:
+                                emitted_anything = True
+                                yield emitted
+                        break
+
+                    except Exception as error:
+                        # A partially delivered stream cannot be retried: the client already has
+                        # those tokens and a second run would duplicate them.
+                        if (
+                            emitted_anything
+                            or attempt >= self._settings.agent_max_attempts
+                            or not is_retryable(error)
+                        ):
+                            raise
+
+                        delay = backoff_delay(attempt)
+                        logger.warning(
+                            "agent_run_retrying",
+                            runner=self.name,
+                            tutor_id=deps.tutor.id,
+                            session_id=deps.session_id,
+                            attempt=attempt,
+                            delay_seconds=round(delay, 2),
+                            error_type=type(error).__name__,
+                        )
+                        deps.invocations.clear()
+                        deps.citations.clear()
+                        state.answer.clear()
+                        await asyncio.sleep(delay)
+
+        except TimeoutError:
+            logger.warning(
+                "agent_timeout",
+                runner=self.name,
+                tutor_id=deps.tutor.id,
+                session_id=deps.session_id,
+                seconds=self._settings.agent_timeout_seconds,
+            )
+            yield AgentEvent(
+                kind=AgentEventKind.ERROR,
+                error_code=AgentTimeoutError.code,
+                text=AgentTimeoutError.message,
+            )
+            return
 
         except Exception as exc:
             logger.exception(
@@ -116,6 +180,26 @@ class LangGraphRunner:
             citations=tuple(deps.citations.values()),
             tool_calls=tuple(deps.invocations),
         )
+
+
+def _apply_overrides(model: BaseChatModel, overrides: ModelOverrides) -> BaseChatModel:
+    """Per-tutor model settings, the LangChain way.
+
+    `bind` returns a configured copy rather than mutating the shared instance — the runner is
+    built once per process and serves every tutor, so mutating it would leak one tutor's
+    temperature into the next one's answer.
+    """
+    bound: dict[str, Any] = {}
+    if overrides.temperature is not None:
+        bound["temperature"] = overrides.temperature
+    if overrides.max_output_tokens is not None:
+        bound["max_output_tokens"] = overrides.max_output_tokens
+
+    if not bound:
+        return model
+    # `bind` is typed as returning a Runnable; at run time it is still a chat model, which is
+    # what `create_agent` requires.
+    return model.bind(**bound)  # type: ignore[return-value]
 
 
 def _build_tools(deps: AgentDeps) -> list[StructuredTool]:
@@ -173,7 +257,7 @@ class _StreamState:
     streamed_this_turn: bool = False
 
 
-def _translate(event: Mapping[str, Any], state: _StreamState) -> AgentEvent | None:
+def _translate(event: Mapping[str, Any], state: _StreamState, deps: AgentDeps) -> AgentEvent | None:
     """Map a LangChain stream event to the transport-agnostic one.
 
     Compare with the Pydantic AI runner: there the events are typed objects matched with
@@ -211,7 +295,7 @@ def _translate(event: Mapping[str, Any], state: _StreamState) -> AgentEvent | No
         return AgentEvent(
             kind=AgentEventKind.TOOL_STARTED,
             tool_name=event.get("name"),
-            source_label=_source_id_of(event.get("data", {}).get("input")),
+            source_label=deps.label_for(_source_id_of(event.get("data", {}).get("input"))),
         )
 
     if kind == "on_tool_end":

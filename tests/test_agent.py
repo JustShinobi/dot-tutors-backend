@@ -18,11 +18,18 @@ from pydantic_ai import ModelMessage
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.contracts import AgentDeps, AgentEvent, AgentEventKind, ChatRole, HistoryMessage
+from app.agent.contracts import (
+    AgentDeps,
+    AgentEvent,
+    AgentEventKind,
+    ChatRole,
+    HistoryMessage,
+    ModelOverrides,
+)
 from app.agent.pydantic_ai_runner import PydanticAIRunner
 from app.core.config import Settings
 from app.db.models.tutor import SourceKind
-from app.schemas.tutor import SourceCreate, TutorCreate
+from app.schemas.tutor import ModelSettings, SourceCreate, TutorCreate
 from app.services.source_service import SourceService
 from app.services.tutor_service import TutorService
 
@@ -174,7 +181,26 @@ async def test_tool_events_are_streamed_so_the_widget_can_show_progress(
 
     started = next(event for event in events if event.kind is AgentEventKind.TOOL_STARTED)
     assert started.tool_name == "search_source"
-    assert started.source_label == source_id
+    # The field is called `source_label` and it now holds one: the model calls tools with ids,
+    # but "consultando <uuid>" is not something to show a user.
+    assert started.source_label == "Politica de trabalho remoto"
+    assert started.source_label != source_id
+
+
+async def test_a_hallucinated_source_id_yields_no_label_instead_of_a_uuid(
+    tutor_service: TutorService, source_service: SourceService, settings: Settings
+) -> None:
+    """The id in a tool call is whatever the model wrote, so it may not exist."""
+    deps = await _make_deps(tutor_service, source_service)
+    runner = _runner(
+        settings,
+        _scripted_model(("search_source", {"source_id": "id-que-nao-existe", "query": "ferias"})),
+    )
+
+    events = await _collect(runner, deps, "Como funcionam as ferias?")
+
+    started = next(event for event in events if event.kind is AgentEventKind.TOOL_STARTED)
+    assert started.source_label is None
 
 
 async def test_the_answer_is_streamed_token_by_token(
@@ -393,6 +419,75 @@ async def test_history_is_replayed_into_the_model(
 
 
 # --- prompt safety ---------------------------------------------------------
+
+
+# --- per-tutor model settings ----------------------------------------------
+
+
+async def test_the_tutor_model_settings_reach_the_model(
+    tutor_service: TutorService, source_service: SourceService, settings: Settings
+) -> None:
+    """`model_settings` is an administrative field; accepting it without applying it is a lie."""
+    seen: dict[str, object] = {}
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        # `AgentInfo` carries the settings the run was launched with, which is the only place
+        # the effect is observable without a real provider.
+        seen.update(info.model_settings or {})
+        yield "ok"
+
+    tutor = await tutor_service.create(
+        TutorCreate(
+            title="Tutor Ajustado",
+            system_instructions="Responda com base nas fontes configuradas.",
+            model_settings=ModelSettings(temperature=0.2, max_output_tokens=512),
+        )
+    )
+    deps = AgentDeps(
+        tutor=tutor,
+        sources=source_service,
+        session_id="sessao-de-teste",
+        max_tool_calls=6,
+        overrides=ModelOverrides.from_mapping(tutor.model_settings),
+    )
+
+    await _collect(_runner(settings, FunctionModel(stream_function=respond)), deps, "oi")
+
+    assert seen["temperature"] == 0.2
+    assert seen["max_tokens"] == 512
+
+
+async def test_a_tutor_without_overrides_uses_the_global_defaults(
+    tutor_service: TutorService, source_service: SourceService, settings: Settings
+) -> None:
+    seen: list[object] = []
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        seen.append(info.model_settings)
+        yield "ok"
+
+    deps = await _make_deps(tutor_service, source_service)
+
+    await _collect(_runner(settings, FunctionModel(stream_function=respond)), deps, "oi")
+
+    assert seen == [None]
+
+
+def test_malformed_overrides_fall_back_instead_of_breaking() -> None:
+    """The column is JSON: an older row, or a hand-edited one, must not kill a conversation."""
+    overrides = ModelOverrides.from_mapping(
+        {"model": "  ", "temperature": "quente", "max_output_tokens": -1}
+    )
+
+    assert overrides == ModelOverrides(model=None, temperature=None, max_output_tokens=None)
+
+
+def test_a_boolean_is_not_a_number() -> None:
+    """`True` is an `int` in Python; letting it through would send `temperature=1`."""
+    overrides = ModelOverrides.from_mapping({"temperature": True, "max_output_tokens": True})
+
+    assert overrides.temperature is None
+    assert overrides.max_output_tokens is None
 
 
 async def test_source_content_is_delimited_as_data(

@@ -38,6 +38,7 @@ from pydantic_ai import (
 from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
+from pydantic_ai.settings import ModelSettings
 
 from app.agent import tools
 from app.agent.contracts import (
@@ -46,6 +47,7 @@ from app.agent.contracts import (
     AgentEventKind,
     ChatRole,
     HistoryMessage,
+    ModelOverrides,
 )
 from app.agent.prompts import build_instructions, format_source_catalogue
 from app.agent.retry import backoff_delay, is_retryable
@@ -56,8 +58,12 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-def build_model(settings: Settings) -> Model:
-    """Resolve the configured LLM. Only Google/Gemini is wired for the MVP."""
+def build_model(settings: Settings, *, model_name: str | None = None) -> Model:
+    """Resolve an LLM. Only Google/Gemini is wired for the MVP.
+
+    `model_name` overrides the global default, which is how a tutor configured with its own
+    model (`model_settings.model`) gets it.
+    """
     if settings.llm_provider != "google":
         msg = (
             f"LLM_PROVIDER={settings.llm_provider!r} nao suportado neste MVP. "
@@ -72,9 +78,19 @@ def build_model(settings: Settings) -> Model:
         )
 
     return GoogleModel(
-        settings.llm_model,
+        model_name or settings.llm_model,
         provider=GoogleProvider(api_key=settings.gemini_api_key),
     )
+
+
+def _model_settings(overrides: ModelOverrides) -> ModelSettings | None:
+    """Translate the tutor's overrides into the framework's per-run settings."""
+    settings: ModelSettings = {}
+    if overrides.temperature is not None:
+        settings["temperature"] = overrides.temperature
+    if overrides.max_output_tokens is not None:
+        settings["max_tokens"] = overrides.max_output_tokens
+    return settings or None
 
 
 def build_agent(model: Model | None) -> Agent[AgentDeps, str]:
@@ -148,8 +164,28 @@ class PydanticAIRunner:
 
     def __init__(self, *, settings: Settings, model: Model | None = None) -> None:
         self._settings = settings
+        # An injected model means a test (or a caller) already decided what to talk to; a tutor
+        # must not be able to steer that towards a real provider.
+        self._model_is_injected = model is not None
         self._model = model if model is not None else build_model(settings)
         self._agent = build_agent(self._model)
+        self._model_cache: dict[str, Model] = {}
+
+    def _model_for(self, requested: str | None) -> Model | None:
+        """Resolve the per-tutor model override (PRD 4.1.1 `model_settings`).
+
+        `None` means "use the agent's default", which is what `run_stream_events` expects when
+        there is nothing to override. Models are cached because constructing one builds a
+        provider and an HTTP client — doing that per message would be a slow leak.
+        """
+        if self._model_is_injected or not requested or requested == self._settings.llm_model:
+            return None
+
+        cached = self._model_cache.get(requested)
+        if cached is None:
+            cached = build_model(self._settings, model_name=requested)
+            self._model_cache[requested] = cached
+        return cached
 
     async def stream(
         self,
@@ -159,6 +195,8 @@ class PydanticAIRunner:
         deps: AgentDeps,
     ) -> AsyncIterator[AgentEvent]:
         limits = UsageLimits(tool_calls_limit=deps.max_tool_calls)
+        model = self._model_for(deps.overrides.model)
+        model_settings = _model_settings(deps.overrides)
         answer: list[str] = []
         usage: dict[str, Any] = {}
         emitted_anything = False
@@ -173,9 +211,13 @@ class PydanticAIRunner:
                             message_history=_to_model_messages(history),
                             deps=deps,
                             usage_limits=limits,
+                            model=model,
+                            model_settings=model_settings,
                         ) as events:
                             async for event in events:
-                                translated = _translate(event, answer=answer, usage=usage)
+                                translated = _translate(
+                                    event, answer=answer, usage=usage, deps=deps
+                                )
                                 if translated is not None:
                                     emitted_anything = True
                                     yield translated
@@ -252,7 +294,9 @@ class PydanticAIRunner:
         )
 
 
-def _translate(event: object, *, answer: list[str], usage: dict[str, Any]) -> AgentEvent | None:
+def _translate(
+    event: object, *, answer: list[str], usage: dict[str, Any], deps: AgentDeps
+) -> AgentEvent | None:
     """Map a Pydantic AI stream event to our transport-agnostic event."""
     # The first slice of text arrives as PartStartEvent, and only the *continuations* come as
     # PartDeltaEvent. Handling deltas alone silently drops the opening of every answer.
@@ -266,7 +310,7 @@ def _translate(event: object, *, answer: list[str], usage: dict[str, Any]) -> Ag
         return AgentEvent(
             kind=AgentEventKind.TOOL_STARTED,
             tool_name=event.part.tool_name,
-            source_label=_source_id_of(event.part),
+            source_label=deps.label_for(_source_id_of(event.part)),
         )
 
     if isinstance(event, FunctionToolResultEvent):
@@ -297,8 +341,10 @@ def _emit_text(text: str, *, answer: list[str]) -> AgentEvent | None:
 def _source_id_of(part: ToolCallPart) -> str | None:
     """Extract `source_id` from a tool call, whether the model sent JSON or a dict.
 
-    This is only a hint shown while the call is in flight; the authoritative record of what was
-    consulted comes from `deps.invocations` at the end of the run.
+    This is only a hint shown while the call is in flight — and the model may well have
+    hallucinated the id, in which case `label_for` returns `None` and the widget falls back to a
+    generic message. The authoritative record of what was consulted comes from
+    `deps.invocations` at the end of the run.
     """
     try:
         args = part.args_as_dict()

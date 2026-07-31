@@ -20,6 +20,7 @@ from app.agent.contracts import (
     AgentRunner,
     ChatRole,
     HistoryMessage,
+    ModelOverrides,
 )
 from app.core.config import Settings
 from app.core.errors import (
@@ -159,6 +160,7 @@ class ChatService:
             sources=self._sources,
             session_id=chat_session.id,
             max_tool_calls=_max_tool_calls(tutor, self._settings),
+            overrides=ModelOverrides.from_mapping(tutor.model_settings),
         )
 
         started = utcnow()
