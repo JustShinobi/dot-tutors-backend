@@ -25,6 +25,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional on purpose: the LangGraph runner exists to justify decision D1 by comparison, not to
+# be required at runtime. Nothing in the default install depends on it.
+langgraph = [
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+    "langchain-google-genai>=2.0",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

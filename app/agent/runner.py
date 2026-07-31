@@ -26,11 +26,7 @@ def build_runner(settings: Settings) -> AgentRunner:
 
     if settings.agent_runner == "langgraph":
         try:
-            # The module lands in the final phase, together with the optional dependency;
-            # the branch exists now so the configuration option is honest about its state.
-            from app.agent.langgraph_runner import (  # type: ignore[import-untyped]
-                LangGraphRunner,
-            )
+            from app.agent.langgraph_runner import LangGraphRunner
         except ImportError as exc:  # pragma: no cover - optional extra
             raise AgentExecutionError(
                 "Runner LangGraph indisponivel: instale as dependencias opcionais com "
