@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     agent_runner: AgentRunnerName = "pydantic_ai"
     agent_max_tool_calls: int = 6
     agent_timeout_seconds: int = 45
+    agent_max_attempts: int = 3
+    """Total attempts per message, including the first. Retries happen inside the timeout."""
 
     # --- knowledge sources -------------------------------------------------
     history_max_messages: int = 20

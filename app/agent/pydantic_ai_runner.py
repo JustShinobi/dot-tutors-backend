@@ -48,6 +48,7 @@ from app.agent.contracts import (
     HistoryMessage,
 )
 from app.agent.prompts import build_instructions, format_source_catalogue
+from app.agent.retry import backoff_delay, is_retryable
 from app.core.config import Settings
 from app.core.errors import AgentExecutionError, AgentTimeoutError
 from app.core.logging import get_logger
@@ -160,19 +161,51 @@ class PydanticAIRunner:
         limits = UsageLimits(tool_calls_limit=deps.max_tool_calls)
         answer: list[str] = []
         usage: dict[str, Any] = {}
+        emitted_anything = False
 
         try:
+            # Retries live inside the total timeout, so they can never extend it.
             async with asyncio.timeout(self._settings.agent_timeout_seconds):
-                async with self._agent.run_stream_events(
-                    user_message,
-                    message_history=_to_model_messages(history),
-                    deps=deps,
-                    usage_limits=limits,
-                ) as events:
-                    async for event in events:
-                        emitted = _translate(event, answer=answer, usage=usage)
-                        if emitted is not None:
-                            yield emitted
+                for attempt in range(1, self._settings.agent_max_attempts + 1):
+                    try:
+                        async with self._agent.run_stream_events(
+                            user_message,
+                            message_history=_to_model_messages(history),
+                            deps=deps,
+                            usage_limits=limits,
+                        ) as events:
+                            async for event in events:
+                                translated = _translate(event, answer=answer, usage=usage)
+                                if translated is not None:
+                                    emitted_anything = True
+                                    yield translated
+                        break
+
+                    except Exception as error:
+                        # A partially delivered stream cannot be retried: the client already
+                        # has those tokens, and running again would duplicate them. Only a
+                        # failure before the first event is safe to repeat.
+                        if (
+                            emitted_anything
+                            or attempt >= self._settings.agent_max_attempts
+                            or not is_retryable(error)
+                        ):
+                            raise
+
+                        delay = backoff_delay(attempt)
+                        logger.warning(
+                            "agent_run_retrying",
+                            tutor_id=deps.tutor.id,
+                            session_id=deps.session_id,
+                            attempt=attempt,
+                            delay_seconds=round(delay, 2),
+                            error_type=type(error).__name__,
+                        )
+                        # Tool records from the failed attempt would otherwise be reported twice.
+                        deps.invocations.clear()
+                        deps.citations.clear()
+                        answer.clear()
+                        await asyncio.sleep(delay)
 
         except TimeoutError:
             logger.warning(
