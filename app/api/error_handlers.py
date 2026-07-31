@@ -23,6 +23,20 @@ from app.core.logging import get_logger, get_request_id
 logger = get_logger(__name__)
 
 
+def resolve_request_id(request: Request | None) -> str | None:
+    """Find the request id, preferring the one recorded on the request itself.
+
+    The contextvar alone is not enough: Starlette runs the last-resort exception handler in the
+    outer `ServerErrorMiddleware`, outside the task where `RequestContextMiddleware` set it, so
+    a 500 -- exactly the response where the id matters most -- would come back with `null`.
+    """
+    if request is not None:
+        stored = getattr(request.state, "request_id", None)
+        if isinstance(stored, str):
+            return stored
+    return get_request_id()
+
+
 def error_response(
     *,
     status_code: int,
@@ -30,16 +44,17 @@ def error_response(
     message: str,
     details: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    request: Request | None = None,
 ) -> JSONResponse:
     payload: dict[str, Any] = {
-        "error": {"code": code, "message": message, "request_id": get_request_id()}
+        "error": {"code": code, "message": message, "request_id": resolve_request_id(request)}
     }
     if details:
         payload["error"]["details"] = details
     return JSONResponse(status_code=status_code, content=payload, headers=headers)
 
 
-async def handle_app_error(_: Request, exc: Exception) -> JSONResponse:
+async def handle_app_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, AppError)
 
     headers = None
@@ -56,10 +71,11 @@ async def handle_app_error(_: Request, exc: Exception) -> JSONResponse:
         message=exc.message,
         details=exc.details or None,
         headers=headers,
+        request=request,
     )
 
 
-async def handle_validation_error(_: Request, exc: Exception) -> JSONResponse:
+async def handle_validation_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, RequestValidationError)
 
     # Field paths and messages are safe and genuinely useful; the raw input is not echoed back.
@@ -75,10 +91,11 @@ async def handle_validation_error(_: Request, exc: Exception) -> JSONResponse:
         code="VALIDATION_ERROR",
         message="Dados invalidos.",
         details={"fields": fields},
+        request=request,
     )
 
 
-async def handle_http_exception(_: Request, exc: Exception) -> JSONResponse:
+async def handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, StarletteHTTPException)
 
     return error_response(
@@ -86,17 +103,23 @@ async def handle_http_exception(_: Request, exc: Exception) -> JSONResponse:
         code=_HTTP_CODES.get(exc.status_code, "HTTP_ERROR"),
         message=str(exc.detail) if exc.detail else "Requisicao invalida.",
         headers=dict(exc.headers) if exc.headers else None,
+        request=request,
     )
 
 
-async def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     """Last resort: log everything, disclose nothing."""
-    logger.exception("unhandled_exception", error_type=type(exc).__name__)
+    logger.exception(
+        "unhandled_exception",
+        error_type=type(exc).__name__,
+        request_id=resolve_request_id(request),
+    )
 
     return error_response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         code="INTERNAL_ERROR",
         message="Erro interno. Se o problema persistir, informe o identificador da requisicao.",
+        request=request,
     )
 
 

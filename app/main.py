@@ -12,6 +12,7 @@ from app.agent.runner import build_runner
 from app.api.cors import DualPolicyCORSMiddleware
 from app.api.error_handlers import register_error_handlers
 from app.api.middleware import RequestContextMiddleware
+from app.api.security_headers import RequestSizeLimitMiddleware, SecurityHeadersMiddleware
 from app.api.v1 import auth, embed, embed_keys, health, tutors
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
@@ -82,6 +83,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
 
+    # Middleware runs bottom-up on the way in: the request id is established first so every
+    # later log line and error body can carry it.
+    app.add_middleware(RequestSizeLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(DualPolicyCORSMiddleware, admin_origins=settings.admin_origins)
 
