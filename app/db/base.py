@@ -14,8 +14,9 @@ from typing import Any, ClassVar
 
 from sqlalchemy import DateTime, String, func
 from sqlalchemy import Enum as SAEnum
+from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import JSON
+from sqlalchemy.types import JSON, TypeDecorator
 
 
 def str_enum_column(enum_class: type[StrEnum]) -> SAEnum:
@@ -35,8 +36,40 @@ def str_enum_column(enum_class: type[StrEnum]) -> SAEnum:
 
 
 def utcnow() -> datetime:
-    """Timezone-aware "now". SQLite has no native timestamptz, so UTC is enforced here."""
+    """Timezone-aware "now"."""
     return datetime.now(UTC)
+
+
+class UtcDateTime(TypeDecorator[datetime]):
+    """A timestamp that is always timezone-aware UTC, on every dialect.
+
+    PostgreSQL round-trips `timestamptz` with its offset intact, but **SQLite has no timezone
+    type and gives the value back naive**. Comparing that with an aware `utcnow()` raises
+    `TypeError: can't compare offset-naive and offset-aware datetimes` — a failure that appears
+    only on the default local database, which is exactly where it does the most damage.
+
+    Normalising in the column type fixes it once for every timestamp, instead of scattering
+    defensive conversions through the services.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            # A naive value reaching the database is a bug upstream; assume UTC rather than
+            # silently storing local time.
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 def new_uuid() -> str:
@@ -52,6 +85,7 @@ class Base(DeclarativeBase):
         dict[str, Any]: JSON,
         list[str]: JSON,
         list[dict[str, Any]]: JSON,
+        datetime: UtcDateTime,
     }
 
 
@@ -67,10 +101,10 @@ class UUIDPrimaryKeyMixin:
 
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, server_default=func.now(), nullable=False
+        UtcDateTime, default=utcnow, server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=utcnow,
         onupdate=utcnow,
         server_default=func.now(),

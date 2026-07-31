@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.base import Base, TimestampMixin, UtcDateTime, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from app.db.models.tutor import Tutor
@@ -33,8 +33,8 @@ class EmbedKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     allowed_origins: Mapped[list[str]] = mapped_column(default=list, nullable=False)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     tutor: Mapped[Tutor] = relationship(back_populates="embed_keys")
 

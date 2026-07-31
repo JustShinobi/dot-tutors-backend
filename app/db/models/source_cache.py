@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, utcnow
+from app.db.base import Base, TimestampMixin, UtcDateTime, UUIDPrimaryKeyMixin, utcnow
 
 if TYPE_CHECKING:
     from app.db.models.tutor import TutorSource
@@ -39,10 +39,8 @@ class SourceDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_modified: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    fetched_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
 
     # Last failure, kept so the agent can tell the user "this source is unavailable" instead of
     # silently answering without it.

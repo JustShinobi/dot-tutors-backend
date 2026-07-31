@@ -11,10 +11,17 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum_column, utcnow
+from app.db.base import (
+    Base,
+    TimestampMixin,
+    UtcDateTime,
+    UUIDPrimaryKeyMixin,
+    str_enum_column,
+    utcnow,
+)
 
 if TYPE_CHECKING:
     from app.db.models.embed import EmbedKey
@@ -38,10 +45,8 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     origin: Mapped[str] = mapped_column(String(255), default="", nullable=False)
 
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
 
     tutor: Mapped[Tutor] = relationship()
     embed_key: Mapped[EmbedKey] = relationship()
