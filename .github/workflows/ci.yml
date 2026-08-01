@@ -7,7 +7,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancelar a execucao anterior economiza runner em pull request. Na main, nao: a
+  # execucao que esta sendo cancelada pode estar no meio de um deploy, e matar o job
+  # entre a migration e o restart deixaria o servidor num estado que ninguem escolheu.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # The suite never calls a real model, so no credential is needed. `APP_ENV=test` also keeps
@@ -161,3 +164,87 @@ jobs:
           echo "a API nao subiu"
           docker logs api
           exit 1
+
+  deploy:
+    name: Deploy para o LXC
+    # Um job, e nao um workflow separado disparado por `workflow_run`: assim o `needs` e
+    # uma dependencia de verdade. Com dois workflows, o gate ficaria por conta de uma
+    # condicao sobre a conclusao do outro — que e a mesma coisa escrita de um jeito em
+    # que da para errar.
+    needs: [quality, postgres]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
+
+    # Exige o Environment `production` configurado no repositorio. E onde ficam os
+    # secrets abaixo, e onde se liga uma aprovacao manual se um dia isso for desejado.
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_API_URL }}
+
+    # Independente da concorrencia do workflow: dois deploys simultaneos na mesma caixa
+    # disputariam o symlink `current`. `cancel-in-progress: false` faz o segundo esperar
+    # o primeiro terminar, em vez de atropelar.
+    concurrency:
+      group: deploy-api-production
+      cancel-in-progress: false
+
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Chave SSH
+        # Escrita em RUNNER_TEMP e nao em ~/.ssh: o runner e self-hosted, entao o HOME
+        # sobrevive entre execucoes e entre repositorios. Deixar uma chave privada la
+        # seria oferece-la ao proximo job que rodar na mesma maquina. RUNNER_TEMP e
+        # limpo ao fim da execucao.
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY"     > "$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+
+      - name: Enviar a release
+        # `--delete` para que um arquivo apagado no repositorio desapareca da release, e
+        # os excludes para que o venv construido no alvo nao seja destruido pelo rsync do
+        # deploy seguinte. `.env` esta na lista por seguranca dupla: o arquivo de ambiente
+        # de verdade mora em shared/ e nunca deveria estar no repositorio, mas se um dia
+        # alguem commitar um, ele nao vai sobrescrever o de producao.
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          rsync -az --delete \
+            --exclude '.git' --exclude '.github' \
+            --exclude '.venv' --exclude '__pycache__' \
+            --exclude '.mypy_cache' --exclude '.ruff_cache' --exclude '.pytest_cache' \
+            --exclude '*.db' --exclude '.env' --exclude '.env.*' \
+            -e "ssh -i $RUNNER_TEMP/deploy_key -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o IdentitiesOnly=yes" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/dot-tutors/api/releases/${{ github.sha }}/"
+
+      - name: Ativar a release
+        # Todo o procedimento — venv, migration, troca de symlink, restart, health check e
+        # rollback — vive na maquina, num script de infra que este repositorio nao contem
+        # e nao versiona. O contrato entre as duas camadas cabe nesta linha: entregue os
+        # bytes em releases/<sha> e chame este comando. Mudar a topologia do servidor nao
+        # toca em nenhum repositorio de aplicacao.
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i "$RUNNER_TEMP/deploy_key" \
+              -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+              -o IdentitiesOnly=yes \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "sudo /usr/local/sbin/dot-tutors-activate api ${{ github.sha }}"
+
+      - name: Fumaca no dominio publico
+        # O remote-deploy ja conferiu /readyz no loopback. Este passo cobre o que aquele
+        # nao alcanca: DNS, certificado e proxy reverso. Sem ele, um Caddy mal
+        # configurado passa pelo pipeline inteiro em verde.
+        run: |
+          curl -fsS --max-time 10 "${{ vars.PUBLIC_API_URL }}/healthz"
+          echo
